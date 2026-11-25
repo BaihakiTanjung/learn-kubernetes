@@ -13,6 +13,7 @@ Klaster yang didokumentasikan di sini: **k3s v1.36.5+k3s1**, 2 node.
 
 - [Architecture.md](Architecture.md) — arsitektur klaster hasil akhir: node, jaringan, namespace, dan keputusan desain.
 - [docs/01-tambah-worker-node.md](docs/01-tambah-worker-node.md) — panduan langkah-demi-langkah menambahkan worker node ke klaster k3s (kasus nyata: vps-38 bergabung ke vps-29, 26 November 2026), lengkap dengan troubleshooting yang ditemui.
+- [docs/02-garbage-collection-optimasi.md](docs/02-garbage-collection-optimasi.md) — garbage collection + optimasi klaster (kasus nyata: assessment 26 November 2026) — apa yang sudah dibersihkan lewat kubectl, apa yang menunggu tangan pemilik server, dan keputusan yang masih menunggu.
 
 ## Aturan keamanan
 
