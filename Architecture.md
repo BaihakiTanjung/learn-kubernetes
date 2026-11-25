@@ -1,6 +1,6 @@
 # Arsitektur Klaster k3s
 
-Status: **berjalan, 2 node** — terakhir diverifikasi 26 November 2026 ~01:20 (assessment GC + optimasi).
+Status: **berjalan, 2 node** — terakhir diverifikasi 26 November 2026 ~02:09 (VoiceStudio + RBAC runner; detail: [docs/03-voicestudio-dan-runner-rbac.md](docs/03-voicestudio-dan-runner-rbac.md)).
 
 ## Gambaran
 
@@ -29,15 +29,16 @@ flowchart TB
 - Kedua node satu VPC, saling menjangkau lewat IP privat (ping `10.20.0.18` dari `vps-38`: 0% loss, ~0,5 ms).
 - API server k3s dijangkau worker lewat `https://10.20.0.18:6443` (dari sisi server sendiri: `https://127.0.0.1:6443`).
 - Flannel (vxlan) untuk jaringan pod antar-node; `vps-29` memakai podCIDR `10.42.0.0/24`, `vps-38` mendapat `10.42.1.0/24` saat registrasi.
+- API server dari internet (`https://103.77.78.114:6443`): TCP terjangkau + TLS handshake OK (SAN memuat 103.77.78.114), tapi server menutup koneksi tanpa respons HTTP (`curl 52`, `/healthz` 000) — rute runner → API via IP publik **belum terbukti** (detail: docs/03 §1.5). Jangan pakai `--insecure-skip-tls-verify` — TLS-nya sudah berhasil, yang gagal adalah respons HTTP-nya.
 - Alamat join alternatif (Tailscale `100.123.155.8` atau publik `103.77.78.114`) hanya boleh dipakai setelah alamatnya dipastikan ada di SAN sertifikat server (cek dengan `openssl s_client`). Jangan pernah pakai `--insecure-skip-tls-verify` — yang benar adalah tambah `--tls-san <alamat>` di config server lalu restart k3s server.
 
 ## Namespace
 
 | Namespace | Isi |
 | --- | --- |
-| `apps` | Kanban / Command Center, `hq-ws` (websocket realtime), office-3d |
+| `apps` | Kanban / Command Center, `hq-ws` (websocket realtime), office-3d (di-pin ke `vps-29` — lihat docs/03) |
 | `core-infra` | PostgreSQL, Redis |
-| `render` | Job render + PVC `render-work` 10Gi |
+| `render` | Job render + PVC `render-work` 10Gi; VoiceStudio (Deployment replicas 1 + PVC `voicestudio-data` 10Gi + Service `:3900`); ServiceAccount `github-render-runner` |
 | `kube-system` | Komponen sistem k3s (CoreDNS, Traefik, dsb.) |
 
 ## Kapasitas & garbage collection
@@ -66,6 +67,11 @@ Angka dari assessment 26 November 2026 ~01:16–01:20 (detail lengkap:
   `container-log-max-files=5` — di `/etc/rancher/k3s/config.yaml` kedua node, lalu restart
   k3s / k3s-agent. Prune image satu kali (`crictl rmi --prune`, perkiraan reclaim 10–30 GB)
   juga menunggu — hati-hati: image VoiceStudio 17 GB ikut terhapus bila di-prune.
+- **Image VoiceStudio terukur ~5,6 GiB** (pull pertama 18 mnt 23 dtk, 26 Nov ~02:09) —
+  angka 17 GB di atas adalah perkiraan sebelum image ter-pull dan **tidak lagi
+  dipakai**. VoiceStudio (peak generate 3,4 GiB) + satu Job render (peak 1,6 GiB)
+  muat bersamaan di vps-38 (~7,75 GiB allocatable) — aturan: **satu render dalam
+  satu waktu**.
 - **Pembersihan level-API sudah selesai:** Job completed 7 → 3, pod Completed 7 → 3
   (CronJob `fleet-local/rke2-machineconfig-cleanup-cronjob` historyLimit 3 → 1, template
   `remotion-smoke-job.yaml` ditambah TTL 86400). Membersihkan objek API/etcd **tidak**
@@ -83,8 +89,29 @@ Angka dari assessment 26 November 2026 ~01:16–01:20 (detail lengkap:
    imagefs melewati ambang — jadi penumpukan yang sudah ada dibersihkan manual satu kali
    (prune), baru threshold 70/60 menjaga supaya tidak menumpuk lagi. CronJob GC
    privileged hanya cadangan; rekomendasi pakai prune + flag kubelet saja.
+6. **VoiceStudio persistent, render ephemeral (diputuskan 26 Nov ~01:34).**
+   VoiceStudio = Deployment replicas 1 yang tetap hangat (cold start = pull image
+   + load model 3,2 GB); render = satu Job per video, dihapus setelah selesai
+   (TTL 86400). Satu pod gabungan ditolak: 3,4 + 1,6 = 5,0 GiB dari ~7,75 GiB
+   allocatable vps-38 → maks 1 render bersamaan, kopling crash, skala terkunci.
+   KEDA tidak dipakai dulu. Objek yang tepat untuk run-once-then-die adalah
+   **Job, bukan Deployment** — Deployment me-restart pod yang selesai.
+7. **Workload hostPath harus di-pin ke node pemilik path.** Deployment
+   `muse-hq-office-3d` memakai hostPath `/home/rlordz12/hq-office-3d` yang hanya
+   ada di vps-29; tanpa pin, pod baru tersangkut di vps-38 (FailedMount, 26 Nov
+   ~01:43). Perbaikan: `nodeSelector: { kubernetes.io/hostname: vps-29 }`.
+   Kalau workload harus jalan di node mana pun, pakai PVC (atau storage bersama),
+   bukan hostPath.
+8. **Runner CI mengakses klaster lewat ServiceAccount dengan RBAC minimal.**
+   SA `github-render-runner` (ns `render`) hanya boleh create/get/list/watch
+   Job + Pod di ns `render` — tanpa akses namespace lain, tanpa akses
+   Secret/Deployment. Token dibaca pemilik server sendiri dari Secret
+   `github-render-runner-token` dan disimpan sebagai GitHub secret
+   `K8S_RENDER_TOKEN`; nilai token tidak pernah masuk repo atau chat.
 
 ## Riwayat
 
 - 26 Nov 2026 ~01:13 — `vps-38` bergabung sebagai worker. Detail langkahnya: [docs/01-tambah-worker-node.md](docs/01-tambah-worker-node.md).
 - 26 Nov 2026 ~01:20 — assessment garbage collection + optimasi; pembersihan level-API selesai, perubahan level-node menunggu tangan pemilik server. Detailnya: [docs/02-garbage-collection-optimasi.md](docs/02-garbage-collection-optimasi.md).
+- 26 Nov 2026 ~01:43 — Deployment office-3d di-pin ke vps-29 (pod baru tersangkut di vps-38 karena hostPath); rollout sukses, situs HTTP 200. Detailnya: [docs/03-voicestudio-dan-runner-rbac.md](docs/03-voicestudio-dan-runner-rbac.md).
+- 26 Nov 2026 ~01:45–02:09 — VoiceStudio jalan di vps-38 (Deployment + PVC + Service), SA + RBAC runner dibuat, `nodeSelector: { workload: render }` dipasang di 3 template Job render, probe 6443 dari internet. Detailnya: [docs/03-voicestudio-dan-runner-rbac.md](docs/03-voicestudio-dan-runner-rbac.md).
