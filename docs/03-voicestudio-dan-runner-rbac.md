@@ -7,9 +7,12 @@ hasil GGUF SELESAI 26 Nov (§1.10) — node VPS tidak bisa menjalankan engine
 TTS Indonesia apa pun (Xeon E5620 tanpa AVX, RAM 7,75 GB); uji Laras TTS
 SELESAI 26 Nov (§1.11) — biner mati SIGILL, AVX2 juga menutup jalur ini;
 rebuild Laras di VPS GAGAL 26 Nov (§1.12) — pivot: Laras JALAN di sandbox
-Muse, render tetap di VPS; draf office-3d SELESAI 26 Nov (§1.13);
-Deployment render standby SELESAI 26 Nov 22:12 (§1.14) — smoke test
-still lulus, rute baked video-audio ditutup untuk T-013.**
+Muse, render tetap di VPS; draf office-3d SELESAI 26 Nov (§1.13) —
+**DIBERHENTIKAN dari k8s 26 Nov 22:30 atas perintah pemilik, live tidak
+tersentuh**; Deployment render standby SELESAI 26 Nov 22:12 (§1.14) —
+smoke test still lulus, rute baked video-audio ditutup untuk T-013;
+**di-rename 26 Nov 22:30 jadi `render-worker` — worker render umum
+(three.js, ffmpeg), HPA tidak dipasang.**
 Yang MENUNGGU tangan/keputusan pemilik server dipisah tegas di
 §3 — jangan dicampur dengan yang sudah selesai. Tidak ada perubahan di klaster
 pada penulisan dokumen ini; semua yang di bawah adalah yang benar-benar
@@ -603,7 +606,30 @@ host live lolos — sisi server terbukti jalan lewat NodePort (di atas).
 Cek akhir tampilan + WS "Live" menunggu pemilik membuka
 `https://office3d-draft.103.77.78.114.sslip.io/` di HP-nya.
 
-### 1.14 Deployment render standby (`remotion-render`) — 26 Nov 21:49–22:12
+**DIBERHENTIKAN dari Kubernetes — 26 Nov 22:30 (perintah pemilik:
+"office3d draft tidak usah di taruh di kubernetes"):**
+
+- Dihapus dari ns `apps`: Deployment `muse-hq-office-3d-draft`,
+  Service `muse-hq-office-3d-draft-service`, Ingress
+  `muse-hq-office-3d-draft-ingress`. Secret TLS
+  `muse-hq-office-3d-draft-tls` **sudah tidak ada** saat dihapus
+  (`NotFound`) — tidak pernah tersimpan sebagai Secret terpisah di ns
+  `apps`; yang tersisa hanya `muse-hq-office-3d-tls` milik live (tidak
+  disentuh). Ingress solver cert-manager (`cm-acme-http-solver-…`)
+  ikut hilang sendiri setelah Ingress dihapus.
+- Verifikasi (26 Nov ~22:31, lewat Traefik NodePort dari vps-29):
+  host draf **HTTP 404** ("404 page not found", HTTP maupun HTTPS) —
+  draf benar-benar mati; live **HTTPS 200, 171.653 B, md5
+  `d391e4a3bf59eb2330a0232aaf16d07c`** (v25, sama persis) — live tidak
+  tersentuh. Deployment live `muse-hq-office-3d` tetap 1/1.
+- **File TIDAK dihapus (arsip):** manifest lokal
+  `~/workspace/muse-hq/hidden_files/muse-hq-office-3d-draft.yaml`
+  tetap; sumber `~/workspace/ts-spaces/muse-hq-3d-draft/` tetap;
+  direktori host VPS `/home/rlordz12/hq-office-3d-draft`
+  (`index.html` 166.906 B) tetap. Draf bisa dideploy ulang kapan saja
+  dari manifest yang sama.
+
+### 1.14 Deployment render standby — 26 Nov 21:49–22:30 (di-rename jadi `render-worker`)
 
 Perintah pemilik 26 Nov 21:49: hasil render dinilai kacau — jalur render
 diubah dari Job ephemeral per klip menjadi **Deployment khusus render,
@@ -614,18 +640,34 @@ rute default muted + mix stems, baked video-audio tetap tutup untuk
 T-013 (§1.12, §1.14 di bawah).
 
 Yang dibuat (ns `render`, manifest
-`~/workspace/muse-hq/hidden_files/vps-render/remotion-render-deployment.yaml`):
+`~/workspace/muse-hq/hidden_files/vps-render/render-worker-deployment.yaml`):
 
 | Resource | Nilai |
 | --- | --- |
-| Deployment | `remotion-render`, replicas 1, **1/1 Running** |
+| Deployment | `render-worker`, replicas 1, **1/1 Running** |
 | Node | **vps-29 — BUKAN vps-38**, `nodeSelector: { kubernetes.io/hostname: vps-29 }` |
 | Alasan node | PVC `render-work` terikat vps-29 oleh local-path nodeAffinity; pod di vps-38 tidak bisa mount PVC itu (§1.11, §1.13 menemukan hal yang sama untuk hostPath office-3d) |
 | Image | `mcr.microsoft.com/playwright:v1.55.0-noble` (sudah ada browser + dependensi) |
 | Command | `sleep infinity` — pod idle ~0 CPU/RAM sampai ada render |
-| Volume | PVC `render-work` ter-mount di `/work` (proyek Remotion + `out/`) |
+| Volume | PVC `render-work` ter-mount di `/work` (proyek Remotion + cartoon-kit + `out/`) |
 | Requests | **1000m / 1536Mi** |
 | Limits | **7000m / 2048Mi** (peak render muted terukur ~1383 Mi → margin ~665 Mi) |
+
+**Rename 26 Nov 22:16–22:30 (perintah pemilik: "namanya jangan
+remotion render, saya mau buat render apapun, pakai threejs, ffmpeg dan
+lain2"):** Deployment `remotion-render` → **`render-worker`** — worker
+render UMUM, bukan khusus Remotion. Manifest baru
+`render-worker-deployment.yaml` (nama + label `app=render-worker`,
+container `render-worker`; image, nodeSelector, requests/limits,
+command, volume — semua sama); skrip `trigger-render-standby.sh`,
+`in-pod-render.sh`, `run-smoke-watcher.sh` diperbarui menunjuk label/nama
+baru (salinan di VPS `/home/rlordz12/` di-sync); Deployment lama dihapus
+(verifikasi: `get deploy remotion-render` → NotFound, `get all -l
+app=remotion-render` → No resources found); manifest lama diarsipkan di
+`vps-render/archive/remotion-render-deployment.yaml`. Pod baru
+`render-worker-84df77f879-dzdmp` 1/1 Ready, 0 restart, di vps-29.
+Tidak ada lagi referensi `remotion-render` di file aktif (kecuali satu
+baris komentar sejarah di manifest baru).
 
 Pemicu render: `trigger-render-standby.sh` (di host, detached + log) +
 `in-pod-render.sh` (dijalankan di dalam pod via `kubectl exec`) —
@@ -695,10 +737,103 @@ memicu still frame 168 lewat pod standby):
 `kubernetes.io/hostname: vps-29`. Template Job lama **Pending
 selamanya**: label `workload=render` hanya ada di vps-38, sedangkan PVC
 `render-work` hanya bisa di-mount di vps-29 — tidak ada node yang
-memenuhi kedua syarat sekaligus. **Catatan: template
-`render-full-job.yaml` dan `render-smoke-job.yaml` MASIH punya
-nodeSelector yang sama (belum diperbaiki)** — jangan dipakai sebelum
-diperbaiki dengan cara yang sama.
+memenuhi kedua syarat sekaligus. **Template `render-full-job.yaml` dan
+`render-smoke-job.yaml` diperbaiki dengan cara yang sama 26 Nov 22:30**
+(nodeSelector → `kubernetes.io/hostname: vps-29`); keempat YAML
+ter-parse (`yaml.safe_load` OK).
+
+**Generalisasi — worker ini TERBUKTI bisa render apapun (26 Nov 22:30):**
+
+Inventaris tool di dalam pod (dicek langsung): node v22.18.0, npm
+10.9.3, python3 3.12.3, Chromium 1187 (Playwright), ffmpeg **6.1.1** +
+ffprobe 6.1.1.
+
+- **ffmpeg sempat HILANG — sudah diperbaiki.** Image playwright tidak
+  membawa ffmpeg; ffmpeg bawaan Playwright
+  (`/ms-playwright/ffmpeg-1011`, n7.0.1-playwright-build-1011) adalah
+  build minimal **tanpa libx264/aac** (gagal `Unrecognized option
+  'preset'`) — jangan dipakai. Solusi yang diterapkan: command pod kini
+  meng-install ffmpeg via apt saat pod start (`apt-get update &&
+  apt-get install -y ffmpeg`, terukur **~34 dtk**, fail-open: bila
+  gagal, pod tetap jalan untuk Remotion/three.js). Terverifikasi di
+  **dua generasi pod**: `ffmpeg -version` → 6.1.1.
+- **Tes nyata (a) three.js** — `node render.mjs
+  frames-render-worker-test "0-2"` (proyek cartoon-kit di PVC):
+  **BERHASIL**, `done 3 frames, 12.17 s/frame`, EXIT=0, 44,3 dtk,
+  3 JPG 1080×1920 (~120 KB tiap) di
+  `/work/cartoon-kit/frames-render-worker-test/`.
+- **Tes nyata (b) ffmpeg transcode** — potong 2 dtk dari klip uji
+  klip 0, re-encode libx264 + AAC: **BERHASIL**, 8,0 dtk, output
+  `/work/tmp/ffmpeg-render-worker-test.mp4` 359.311 B, ffprobe: h264
+  1080×1920, duration 2.000000 s.
+- **Verifikasi end-to-end trigger (pasca-rename):** trigger `still`
+  via pod baru → `t013-standby-verify-frame168.png`, 684.309 B,
+  **md5 `5a60b58a…` IDENTIK dengan smoke still** (render
+  deterministik), peak memori ~1064 Mi dari limit 2048 Mi, recycle pod
+  berhasil (pengganti Ready). File still Mira tidak tersentuh (nama
+  output beda). Trace EACCES di log adalah yang sudah dikenal
+  (harmless, browser yatim).
+
+**HPA — TIDAK dipasang (perintah pemilik 26 Nov 22:17: "kalau mau
+pasang HPA"):** metrics-server **SEHAT** (apiservice
+`v1beta1.metrics.k8s.io` Available=True, `kubectl top nodes` jalan,
+deployment metrics-server 1/1) — jadi HPA *bisa* dipasang secara
+teknis. Tapi **tidak membantu sama sekali** di desain ini, karena
+4 alasan:
+
+1. **PVC RWO local-path (vps-29):** replika ke-2 di vps-38 tidak bisa
+   mount PVC (Pending); replika ke-2 di vps-29 *bisa* mount tapi
+   berbagi direktori `/work` yang sama dengan pod pertama — dua render
+   menulis `out/`, `node_modules`, `tmp` yang sama = balapan file dan
+   corrupt.
+2. **Tidak ada sinyal scaling:** pod idle ~0 CPU; render dipicu dari
+   luar via `kubectl exec`, bukan oleh trafik. Tidak ada metrik
+   "antrean render" — HPA butuh metrik, dan CPU/memori pod batch tidak
+   merepresentasikan beban.
+3. **Tidak ada kapasitas:** vps-29 RAM bebas **1741 MB**; satu replika
+   minta requests 1536Mi dan render memuncak ~1383Mi. Replika ke-2
+   hanya akan mengulang swap-thrash yang membunuh muted2.
+4. **Trigger berasumsi tepat 1 pod:** lock file host + pilih
+   `.items[0]` — replika ganda merusak asumsi ini.
+
+**Yang membuat autoscaling NYATA (bukan HPA di pod ini):** antrean
+kerja (render request sebagai Job / queue, worker menarik kerja bukan
+di-exec) + worker per-replika dengan PVC masing-masing atau storage
+RWX + kapasitas di **vps-38** (95% kosong: 76m CPU, 481Mi RAM
+terpakai). Di atas desain itu, HPA/KEDA berbasis kedalaman antrean baru
+bermakna. **Keputusan akhir tetap di pemilik** — tidak ada HPA yang
+dipasang.
+
+**Defect re-check — persiapan produksi brutal (26 Nov 22:30):**
+
+Diperbaiki:
+
+- `render-full-job.yaml` + `render-smoke-job.yaml`: nodeSelector
+  diperbaiki ke vps-29 (di atas).
+- **Bug recycle loop trigger:** `.items[0]` sesaat setelah delete
+  masih bisa menunjuk pod LAMA yang Terminating, sehingga skrip bisa
+  mengklaim "Pod pengganti Ready" padahal itu pod lama. Diperbaiki:
+  cek UID pod pengganti ≠ UID pod lama sebelum klaim Ready (sudah
+  di-sync ke VPS).
+- Komentar pre-flight trigger diperjelas: **harus dijalankan di
+  vps-29** (`free -m` mengukur host lokal, bukan node pod).
+- Komentar usang di `run-smoke-after-jobs.sh` diperbarui.
+
+Sisa (jujur):
+
+- RAM node untuk video masih tipis: bebas 1741 MB vs syarat 1500 MB —
+  lolos tipis.
+- Lock file `/tmp/render-standby.lock` bertahan bila trigger di-SIGKILL
+  (perlu `rmdir` manual — sudah terdokumentasi di skrip).
+- ffmpeg baru tersedia ~1 menit setelah pod start; cek
+  `ffmpeg -version` dulu sebelum job ffmpeg di pod yang baru didaur
+  ulang.
+- `render-full-job.yaml` (WORKERS=2 Chromium + ffmpeg + python, limit
+  1600Mi) dirancang untuk RAM lega vps-38; di vps-29 kemungkinan
+  thrash — **belum dites, jangan dijalankan buta**.
+- `in-pod-render.sh` (`set -e`): bila `timeout` membunuh render,
+  skrip berhenti sebelum mencetak memori cgroup — kosmetik, trigger
+  tetap menangani kegagalan.
 
 **Opsi lanjutan (belum dikerjakan, belum diputuskan):** migrasi render
 ke **vps-38 (95% kosong)** — butuh PVC baru di vps-38 + salin proyek
@@ -722,12 +857,13 @@ Diputuskan pemilik server 26 November 2026 ~01:34 ("Pisah seperti saranmu"):
    event-driven baru dipertimbangkan bila frekuensi render naik.
 
 Perubahan 26 Nov 21:57 (§1.14): pemilik membalik butir 2 — render kini
-Deployment standby `remotion-render` (replicas 1, `sleep infinity`),
-bukan Job per video. Alasannya: hasil render dinilai kacau + Job muted
-merangkak 0 frame di node vps-29 yang swap-thrash; prinsip baru "render
-harus aman di VPS, bagaimanapun caranya". Job tetap ada sebagai
-fallback/pembanding, dan template `remotion-clip-job.yaml` diperbaiki
-pin-nya ke vps-29 (§1.14); dua template lain masih ber-nodeSelector lama.
+Deployment standby `render-worker` (replicas 1, `sleep infinity`,
+di-rename dari `remotion-render` 26 Nov 22:30), bukan Job per video.
+Alasannya: hasil render dinilai kacau + Job muted merangkak 0 frame di
+node vps-29 yang swap-thrash; prinsip baru "render harus aman di VPS,
+bagaimanapun caranya". Job tetap ada sebagai fallback/pembanding, dan
+template `remotion-clip-job.yaml` diperbaiki pin-nya ke vps-29 (§1.14);
+dua template lain diperbaiki dengan cara yang sama 26 Nov 22:30.
 
 ## 3. Yang MENUNGGU tangan / keputusan pemilik server
 
@@ -896,16 +1032,24 @@ Menunggu keputusan pemilik (setelah §1.9 dan §1.10):
 - **Draf office-3d punya Deployment sendiri** (§1.13):
   `muse-hq-office-3d-draft` di `office3d-draft.103.77.78.114.sslip.io`,
   hostPath baru di vps-29, juga di-pin ke vps-29; klien WS-nya menunjuk ke
-  hq-ws live (read-only, status yang sama dengan live).
-- **Render kini Deployment standby** (§1.14): `remotion-render`
-  (replicas 1, `sleep infinity`, di vps-29 karena PVC `render-work`
-  terikat vps-29), pemicu `trigger-render-standby.sh` + `in-pod-render.sh`;
-  4 lapis pengaman (requests/limits, pre-flight RAM, serialisasi + lock,
+  hq-ws live (read-only, status yang sama dengan live). **DIBERHENTIKAN
+  dari k8s 26 Nov 22:30 atas perintah pemilik** — Deployment/Service/
+  Ingress dihapus, host draf 404, live tetap 200 md5 `d391e4a3…` (v25);
+  manifest lokal + sumber + direktori host VPS tetap sebagai arsip.
+- **Render kini Deployment standby** (§1.14): `render-worker`
+  (di-rename dari `remotion-render` 26 Nov 22:30; replicas 1,
+  `sleep infinity`, di vps-29 karena PVC `render-work` terikat vps-29),
+  pemicu `trigger-render-standby.sh` + `in-pod-render.sh`; 4 lapis
+  pengaman (requests/limits, pre-flight RAM, serialisasi + lock,
   recycle pod + timeout, progres `tr '\r' '\n'`); rute baked video-audio
   ditutup untuk T-013; smoke test still frame 168 lulus 26 Nov 22:11–22:12
-  (< 1 menit, md5 identik di pod/VPS/sandbox). Template
-  `remotion-clip-job.yaml` diperbaiki pin-nya ke vps-29; dua template lain
-  masih ber-nodeSelector lama.
+  (< 1 menit, md5 identik di pod/VPS/sandbox). Worker ini TERBUKTI
+  render umum: three.js + ffmpeg 6.1.1 (di-install via apt saat pod
+  start) lulus tes nyata. **HPA TIDAK dipasang** — metrics-server sehat,
+  tapi HPA tidak membantu desain ini (PVC RWO, tidak ada sinyal antrean,
+  RAM vps-29 tipis, trigger asumsi 1 pod); autoscaling nyata butuh
+  antrean + kapasitas vps-38. Template Job render sudah diperbaiki
+  pin-nya ke vps-29 (keempat YAML).
 - **Rute API publik belum terbukti** (§1.5) — keputusan rute + eksposur
   VoiceStudio menunggu pemilik (§3.5).
 - Image VoiceStudio terukur **~5,6 GiB** — angka 17 GB di docs/02 sudah tidak
