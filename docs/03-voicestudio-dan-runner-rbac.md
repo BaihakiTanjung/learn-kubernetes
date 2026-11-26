@@ -533,6 +533,73 @@ di VPS, tidak berubah.** VoiceStudio laptop tetap ada sebagai cadangan.
 Sisa yang menunggu di §3.6 untuk mesin TTS VPS (upgrade RAM / node baru)
 tidak lagi mendesak — Laras sandbox adalah jalur produksi narasi saat ini.
 
+### 1.13 Deployment draf office-3d (`muse-hq-office-3d-draft`) — 26 Nov 21:52
+
+Perintah pemilik 26 Nov 21:51: draf kantor 3D (`muse-hq-3d-draft`, Space
+Library-only) dideploy juga ke Kubernetes sebagai deployment TERPISAH —
+pola sama seperti clone live (§1.4), host baru, hostPath baru. Live tidak
+disentuh.
+
+Sumber draf: `~/workspace/ts-spaces/muse-hq-3d-draft/index.html` (2.742
+baris, 166.906 byte, md5 `c35e6f2d3efa8b32b9c2164d8bb7bb8d`, judul
+"MUSE HQ 3D Draft") + `assets/three.min.js` (603.445 byte, md5
+`eb8549863a97355411c3259a3f93b8e1` — sama seperti live).
+
+Yang dibuat (ns `apps`, manifest
+`~/workspace/muse-hq/hidden_files/muse-hq-office-3d-draft.yaml`, salinan di
+VPS `/home/rlordz12/muse-hq-office-3d-draft.yaml`):
+
+- **hostPath baru** `/home/rlordz12/hq-office-3d-draft` di vps-29 —
+  `index.html` + `assets/` disalin via scp lewat tunnel proxy, `chmod 644`
+  kedua file. Direktori live `/home/rlordz12/hq-office-3d` tidak disentuh.
+- **Deployment `muse-hq-office-3d-draft`** (nginx:alpine, replicas 1,
+  `nodeSelector: { kubernetes.io/hostname: vps-29 }` langsung di manifest —
+  pelajaran §1.4, jangan ulangi tanpa pin), resources sama seperti live
+  (request 50m/64Mi, limit 200m/128Mi), hostPath `readOnly`.
+- **Service** `muse-hq-office-3d-draft-service` (ClusterIP :80) +
+  **Ingress** `muse-hq-office-3d-draft-ingress` (Traefik websecure,
+  cluster-issuer letsencrypt-prod), host
+  `office3d-draft.103.77.78.114.sslip.io`, TLS secret
+  `muse-hq-office-3d-draft-tls` (Certificate otomatis dari Ingress,
+  READY True).
+- Pod `muse-hq-office-3d-draft-7b5677d458-lg79d` 1/1 Running, 0 restart,
+  di vps-29; rollout sukses.
+
+Verifikasi (26 Nov ~21:55–22:05):
+
+- **Lewat Traefik NodePort** (`curl --resolve …:32557:127.0.0.1` dari
+  vps-29): index **HTTP 200, 166.906 B, md5 sama** dengan lokal + VPS,
+  judul "MUSE HQ 3D Draft"; `assets/three.min.js` **HTTP 200, 603.445 B,
+  md5 sama**. Rantai file → pod → Traefik → klien terverifikasi penuh.
+- **Catatan uji:** curl dari VPS ke IP publiknya sendiri
+  (`https://office3d…/`) gagal untuk live MAUPUN draf (HTTP 000) — hairpin
+  NAT VPS ke IP publiknya rusak secara umum, jadi itu BUKAN alat uji
+  yang valid. Uji yang benar: NodePort (di atas) atau dari luar klaster.
+- **Live tidak tersentuh:** `https://office3d.103.77.78.114.sslip.io/`
+  tetap HTTP 200, md5 `d391e4a3…` (v25); Deployment/Service/Ingress/
+  sertifikat live tidak diubah.
+
+**Pelajaran — mode direktori ikut tersalin `scp -r`:** `assets/` di sumber
+bermode 770, dan `scp -r` mempertahankannya — nginx (user `nginx` di
+container, bukan pemilik) tidak bisa masuk direktori → `three.min.js`
+HTTP 403 padahal file-nya sendiri 644. Perbaikan: `chmod 755` pada
+direktori `assets/` di VPS, lalu 200. Ini sekelas dengan BUG 5 draf
+(aset tidak tersalin → 404): **selalu verifikasi URL aset, bukan hanya
+index** — dan samakan mode direktori dengan live (`assets/` live: 775).
+
+**Wiring WS draf (dilaporkan apa adanya, tidak diubah):** JS draf
+menunjuk ke hq-ws LIVE (`wss://office3d.103.77.78.114.sslip.io/ws`,
+`connectLive`/`applyLiveStatus` verbatim dari live) — draf hanya
+MENAMPILKAN status live yang sama, read-only, tidak pernah POST. Jadi
+draf dan live berbagi sumber status; tidak ada server WS kedua. Status
+"Live" di draf hanya bisa dibuktikan dari HP/browser pemilik (sandbox
+tidak bisa verifikasi WS).
+
+**Batasan verifikasi dari sandbox:** egress proxy sandbox tidak bisa
+mengambil host baru ini (curl: empty reply; fetch browser: 403) sementara
+host live lolos — sisi server terbukti jalan lewat NodePort (di atas).
+Cek akhir tampilan + WS "Live" menunggu pemilik membuka
+`https://office3d-draft.103.77.78.114.sslip.io/` di HP-nya.
 
 ## 2. Keputusan desain: pisah VoiceStudio dan render Job
 
@@ -708,6 +775,10 @@ Menunggu keputusan pemilik (setelah §1.9 dan §1.10):
 - **Penjadwalan diperbaiki di dua tempat:** 3 template Job render di-pin ke
   vps-38 via `workload: render`; office-3d di-pin ke vps-29 karena hostPath
   (§1.3, §1.4).
+- **Draf office-3d punya Deployment sendiri** (§1.13):
+  `muse-hq-office-3d-draft` di `office3d-draft.103.77.78.114.sslip.io`,
+  hostPath baru di vps-29, juga di-pin ke vps-29; klien WS-nya menunjuk ke
+  hq-ws live (read-only, status yang sama dengan live).
 - **Rute API publik belum terbukti** (§1.5) — keputusan rute + eksposur
   VoiceStudio menunggu pemilik (§3.5).
 - Image VoiceStudio terukur **~5,6 GiB** — angka 17 GB di docs/02 sudah tidak

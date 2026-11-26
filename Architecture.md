@@ -36,7 +36,7 @@ flowchart TB
 
 | Namespace | Isi |
 | --- | --- |
-| `apps` | Kanban / Command Center, `hq-ws` (websocket realtime), office-3d (di-pin ke `vps-29` — lihat docs/03) |
+| `apps` | Kanban / Command Center, `hq-ws` (websocket realtime), office-3d (di-pin ke `vps-29` — lihat docs/03) + draf office-3d (`muse-hq-office-3d-draft`, host `office3d-draft…`, juga di-pin ke `vps-29` — lihat docs/03 §1.13) |
 | `core-infra` | PostgreSQL, Redis |
 | `render` | Job render + PVC `render-work` 10Gi; VoiceStudio (Deployment replicas 1 + PVC `voicestudio-data` 10Gi + Service `:3900`); ServiceAccount `github-render-runner` |
 | `kube-system` | Komponen sistem k3s (CoreDNS, Traefik, dsb.) |
@@ -115,3 +115,4 @@ Angka dari assessment 26 November 2026 ~01:16–01:20 (detail lengkap:
 - 26 Nov 2026 ~01:20 — assessment garbage collection + optimasi; pembersihan level-API selesai, perubahan level-node menunggu tangan pemilik server. Detailnya: [docs/02-garbage-collection-optimasi.md](docs/02-garbage-collection-optimasi.md).
 - 26 Nov 2026 ~01:43 — Deployment office-3d di-pin ke vps-29 (pod baru tersangkut di vps-38 karena hostPath); rollout sukses, situs HTTP 200. Detailnya: [docs/03-voicestudio-dan-runner-rbac.md](docs/03-voicestudio-dan-runner-rbac.md).
 - 26 Nov 2026 ~01:45–02:09 — VoiceStudio jalan di vps-38 (Deployment + PVC + Service), SA + RBAC runner dibuat, `nodeSelector: { workload: render }` dipasang di 3 template Job render, probe 6443 dari internet. Detailnya: [docs/03-voicestudio-dan-runner-rbac.md](docs/03-voicestudio-dan-runner-rbac.md).
+- 26 Nov 2026 ~21:52 — Draf kantor 3D dideploy sebagai Deployment terpisah `muse-hq-office-3d-draft` (host `office3d-draft.103.77.78.114.sslip.io`, hostPath baru di vps-29, di-pin ke vps-29); verifikasi HTTP 200 + md5 lewat Traefik NodePort; live tidak disentuh. Detailnya: [docs/03-voicestudio-dan-runner-rbac.md](docs/03-voicestudio-dan-runner-rbac.md).
