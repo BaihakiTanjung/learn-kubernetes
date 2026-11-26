@@ -7,7 +7,9 @@ hasil GGUF SELESAI 26 Nov (§1.10) — node VPS tidak bisa menjalankan engine
 TTS Indonesia apa pun (Xeon E5620 tanpa AVX, RAM 7,75 GB); uji Laras TTS
 SELESAI 26 Nov (§1.11) — biner mati SIGILL, AVX2 juga menutup jalur ini;
 rebuild Laras di VPS GAGAL 26 Nov (§1.12) — pivot: Laras JALAN di sandbox
-Muse, render tetap di VPS.**
+Muse, render tetap di VPS; draf office-3d SELESAI 26 Nov (§1.13);
+Deployment render standby SELESAI 26 Nov 22:12 (§1.14) — smoke test
+still lulus, rute baked video-audio ditutup untuk T-013.**
 Yang MENUNGGU tangan/keputusan pemilik server dipisah tegas di
 §3 — jangan dicampur dengan yang sudah selesai. Tidak ada perubahan di klaster
 pada penulisan dokumen ini; semua yang di bawah adalah yang benar-benar
@@ -601,6 +603,108 @@ host live lolos — sisi server terbukti jalan lewat NodePort (di atas).
 Cek akhir tampilan + WS "Live" menunggu pemilik membuka
 `https://office3d-draft.103.77.78.114.sslip.io/` di HP-nya.
 
+### 1.14 Deployment render standby (`remotion-render`) — 26 Nov 21:49–22:12
+
+Perintah pemilik 26 Nov 21:49: hasil render dinilai kacau — jalur render
+diubah dari Job ephemeral per klip menjadi **Deployment khusus render,
+standby 1 pod**. Prinsip pemilik 26 Nov 21:57: **"render harus aman di
+VPS, bagaimanapun caranya"** — keandalan + isolasi resource didahulukan
+(tanpa OOM / mengganggu layanan lain, progres terpantau, timeout bersih);
+rute default muted + mix stems, baked video-audio tetap tutup untuk
+T-013 (§1.12, §1.14 di bawah).
+
+Yang dibuat (ns `render`, manifest
+`~/workspace/muse-hq/hidden_files/vps-render/remotion-render-deployment.yaml`):
+
+| Resource | Nilai |
+| --- | --- |
+| Deployment | `remotion-render`, replicas 1, **1/1 Running** |
+| Node | **vps-29 — BUKAN vps-38**, `nodeSelector: { kubernetes.io/hostname: vps-29 }` |
+| Alasan node | PVC `render-work` terikat vps-29 oleh local-path nodeAffinity; pod di vps-38 tidak bisa mount PVC itu (§1.11, §1.13 menemukan hal yang sama untuk hostPath office-3d) |
+| Image | `mcr.microsoft.com/playwright:v1.55.0-noble` (sudah ada browser + dependensi) |
+| Command | `sleep infinity` — pod idle ~0 CPU/RAM sampai ada render |
+| Volume | PVC `render-work` ter-mount di `/work` (proyek Remotion + `out/`) |
+| Requests | **1000m / 1536Mi** |
+| Limits | **7000m / 2048Mi** (peak render muted terukur ~1383 Mi → margin ~665 Mi) |
+
+Pemicu render: `trigger-render-standby.sh` (di host, detached + log) +
+`in-pod-render.sh` (dijalankan di dalam pod via `kubectl exec`) —
+render di dalam pod **identik** dengan Job (script yang sama,
+`render-cf.cjs`); output tetap di PVC `/work/remotion-poc-byhkab/out/`.
+Mode yang didukung: `video` (muted) dan `still`. Mode `video-audio`
+**DITOLAK mentah-mentah oleh trigger** (rute baked merangkak — §1.12).
+
+**4 lapis pengaman** (jawaban atas prinsip "render harus aman"):
+
+1. **Resource di-kunci di manifest** — requests 1000m/1536Mi, limits
+   7000m/2048Mi; pod standby tidak bisa makan RAM node tanpa batas.
+2. **Pre-flight RAM** — sebelum start, trigger cek RAM available node:
+   video butuh ≥ **1500 MB**, still ≥ **800 MB**; di bawah itu render
+   **ditolak** (exit 2), bukan dibiarkan OOM di tengah jalan.
+3. **Serialisasi** — satu render dalam satu waktu: trigger menolak bila
+   ada Job render aktif di klaster **dan** bila lock file
+   `/tmp/render-standby.lock` masih ada (lock dihapus otomatis saat
+   render selesai/gagal; hapus manual hanya bila yakin tidak ada render
+   jalan).
+4. **Recycle wajib + timeout** — pod **di-delete tiap selesai render**
+   (Deployment membuat pengganti yang segar): tiap render membocorkan
+   ~2 browser Chrome yatim (~150 MB) yang tidak bisa di-kill dari dalam
+   pod, jadi tanpa recycle memori pod merangkak naik tiap render.
+   Timeout GNU di dalam pod: **1500 dtk video / 300 dtk still** —
+   render yang menggantung dimatikan bersih, bukan dibiarkan jalan
+   sampai `activeDeadlineSeconds` Job (pola lama).
+5. **Progres terpantau** — log render dibaca dengan `tr '\r' '\n'`
+   (pelajaran §1.12: progres Remotion pakai `\r` tanpa `\n`, jadi
+   `kubectl logs | tail` biasa menyesatkan — progres tidak kelihatan
+   sampai render selesai).
+
+Konteks — kenapa Job lama ditinggalkan (26 Nov ~21:40–22:10):
+
+- Job muted2 klip 0 (+28 px) **merangkak 0 frame ~12 menit** lalu
+  **dimatikan 22:10** (terkonfirmasi hilang): node vps-29 swap-thrash —
+  RAM 80%, swap 2,8 GB, bebas ~1290 MB. Setelah dimatikan RAM membaik
+  80% → 71%, bebas ~1697 MB. Sync PVC +28 px tetap berlaku, tidak perlu
+  sync ulang; re-render klip 0 pindah ke pod standby setelah smoke test
+  + verdict mask Mira.
+- Job audio baked (`remotion-t013-klip0-audio`) **Failed** — rute baked
+  resmi ditutup untuk T-013; rakitan final tetap muted + mix stems
+  (`mix-cf-final.py`, desain §1.12).
+- Node vps-29 saat itu: RAM available **1758 MB**, swap 2602/4095 MB —
+  video lolos tipis dari syarat pre-flight 1500 MB. Artinya margin
+  render video di vps-29 **sangat tipis**; satu layanan lain yang makan
+  RAM bisa membuat render ditolak pre-flight (itu disengaja — lebih baik
+  ditolak di awal daripada OOM di tengah).
+
+**Smoke test — BERHASIL 26 Nov 22:11–22:12** (skrip
+`run-smoke-watcher.sh`, menunggu sampai tidak ada Job aktif, lalu
+memicu still frame 168 lewat pod standby):
+
+- Still frame 168 **< 1 menit** (`npm install` ~11 dtk + render),
+  `SMOKE-EXIT=0`.
+- PNG **1080×1920, 684.309 byte, md5
+  `5a60b58a620b5730c1e6a5671be359ae`** — **identik** di pod, di /tmp VPS,
+  dan di sandbox (tiga salinan, md5 sama).
+- Peak memori still **~1000 Mi** dari limit 2048 Mi.
+- Pod lama didaur ulang setelah smoke, pengganti **Ready** (recycle
+  wajib terbukti jalan).
+- Still disalin ke folder klip 0 untuk verifikasi mask Mira; video
+  re-render klip 0 menunggu verdict mask.
+
+**Perbaikan bug laten — template `remotion-clip-job.yaml`:**
+`nodeSelector: { workload: render }` **dihapus** → diganti
+`kubernetes.io/hostname: vps-29`. Template Job lama **Pending
+selamanya**: label `workload=render` hanya ada di vps-38, sedangkan PVC
+`render-work` hanya bisa di-mount di vps-29 — tidak ada node yang
+memenuhi kedua syarat sekaligus. **Catatan: template
+`render-full-job.yaml` dan `render-smoke-job.yaml` MASIH punya
+nodeSelector yang sama (belum diperbaiki)** — jangan dipakai sebelum
+diperbaiki dengan cara yang sama.
+
+**Opsi lanjutan (belum dikerjakan, belum diputuskan):** migrasi render
+ke **vps-38 (95% kosong)** — butuh PVC baru di vps-38 + salin proyek
+406 MB + DNS bypass Opsi B (§1.6) + image pull. Ini menghilangkan
+masalah RAM tipis di vps-29; dicatat di §3.6 butir 4.
+
 ## 2. Keputusan desain: pisah VoiceStudio dan render Job
 
 Diputuskan pemilik server 26 November 2026 ~01:34 ("Pisah seperti saranmu"):
@@ -616,6 +720,14 @@ Diputuskan pemilik server 26 November 2026 ~01:34 ("Pisah seperti saranmu"):
    kopling crash (satu mati, keduanya mati), skala terkunci.
 4. **KEDA tidak dipakai dulu** — render hanya beberapa kali sehari; autoscaling
    event-driven baru dipertimbangkan bila frekuensi render naik.
+
+Perubahan 26 Nov 21:57 (§1.14): pemilik membalik butir 2 — render kini
+Deployment standby `remotion-render` (replicas 1, `sleep infinity`),
+bukan Job per video. Alasannya: hasil render dinilai kacau + Job muted
+merangkak 0 frame di node vps-29 yang swap-thrash; prinsip baru "render
+harus aman di VPS, bagaimanapun caranya". Job tetap ada sebagai
+fallback/pembanding, dan template `remotion-clip-job.yaml` diperbaiki
+pin-nya ke vps-29 (§1.14); dua template lain masih ber-nodeSelector lama.
 
 ## 3. Yang MENUNGGU tangan / keputusan pemilik server
 
@@ -747,6 +859,12 @@ Menunggu keputusan pemilik (setelah §1.9 dan §1.10):
    — statusnya MOOT sampai ada keputusan soal jalur GGUF (item 1 di atas).
    Menerima lisensi adalah persetujuan legal — agen tidak boleh menerimanya
    atas nama pemilik.
+4. **Migrasi render ke vps-38 (opsi, belum diputuskan)** (§1.14):
+   vps-38 95% kosong, sedangkan render video di vps-29 lolos tipis dari
+   syarat pre-flight RAM 1500 MB (available 1758 MB). Migrasi butuh PVC
+   baru di vps-38 + salin proyek 406 MB + DNS bypass Opsi B (§1.6) +
+   image pull. Keputusan menunggu pemilik; sampai diputuskan, render
+   tetap di pod standby vps-29.
 
 ## 4. Ringkasan
 
@@ -779,6 +897,15 @@ Menunggu keputusan pemilik (setelah §1.9 dan §1.10):
   `muse-hq-office-3d-draft` di `office3d-draft.103.77.78.114.sslip.io`,
   hostPath baru di vps-29, juga di-pin ke vps-29; klien WS-nya menunjuk ke
   hq-ws live (read-only, status yang sama dengan live).
+- **Render kini Deployment standby** (§1.14): `remotion-render`
+  (replicas 1, `sleep infinity`, di vps-29 karena PVC `render-work`
+  terikat vps-29), pemicu `trigger-render-standby.sh` + `in-pod-render.sh`;
+  4 lapis pengaman (requests/limits, pre-flight RAM, serialisasi + lock,
+  recycle pod + timeout, progres `tr '\r' '\n'`); rute baked video-audio
+  ditutup untuk T-013; smoke test still frame 168 lulus 26 Nov 22:11–22:12
+  (< 1 menit, md5 identik di pod/VPS/sandbox). Template
+  `remotion-clip-job.yaml` diperbaiki pin-nya ke vps-29; dua template lain
+  masih ber-nodeSelector lama.
 - **Rute API publik belum terbukti** (§1.5) — keputusan rute + eksposur
   VoiceStudio menunggu pemilik (§3.5).
 - Image VoiceStudio terukur **~5,6 GiB** — angka 17 GB di docs/02 sudah tidak
