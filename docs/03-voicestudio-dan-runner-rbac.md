@@ -936,6 +936,78 @@ added`, `8472/udp ALLOW IN 10.20.0.0/24`.
 - Migrasi render ke vps-38 (§3.6 butir 4) kini prasyarat jaringannya
   terpenuhi; keputusan tetap menunggu pemilik.
 
+### 1.16 Refresh Command Center — pertanyaan menunggu jawaban diperbarui (27 Nov ~02:05)
+
+**Pemicu:** pemilik 27 Nov ~02:00: "kanban dan command center itu
+tidak terupdate". Kanban sudah diperbaiki Birunix sendiri via API (9 kartu
+dipindah; 26 kartu, terverifikasi — T-013 ke `in_progress`, Keresahan
+di-archive, Kiko + T-007 ke `blocked`). Command Center masih menampilkan
+pertanyaan dari 24–25 Nov — semuanya sudah dijawab kecuali Prompt
+Orchestra (D-09); pertanyaan yang **benar-benar menunggu** jawaban pemilik
+tidak ada di sana.
+
+**Yang diubah** — hanya `command-center.html`
+(`~/workspace/muse-hq/hidden_files/hq-apps/code/command-center.html`),
+array `DECISIONS` + `PROJECTS` saja. Logika lain tidak disentuh;
+`decisions.json` di PVC **hanya dibaca, tidak ditulis** (keputusan yang
+sudah tercatat tetap utuh — verifikasi: 35 total, 0 unapplied, sebelum
+dan sesudah deploy).
+
+`DECISIONS` — dipertahankan: `Prioritas proyek`, `DevOps jadi proyek`
+(sudah dijawab — riwayat), `Prompt Orchestra` (prompt-nya masih menunggu,
+D-09). Dihapus (sudah dijawab, tidak relevan lagi): `Storyboard Kiko`,
+`Label AI Instagram (5 Reel)`, `Klip demo 7 seri Reel` (+ entri
+`DROP_CHOICE`-nya). Ditambah 10 pertanyaan baru, masing-masing dengan
+entri `DROP_CHOICE` "Tidak jadi — batalkan":
+
+| Target | Pilihan |
+| --- | --- |
+| Rancher | Batasi 3 Gi / Hapus Rancher / Biarkan saja |
+| HPA render-worker | Pasang HPA / Jangan dulu |
+| Descheduler | Pasang Descheduler / Jangan dulu |
+| Migrasi render-worker | Pindah ke vps-38 / Tetap di vps-29 |
+| Jam slot 2 Reels | Pagi 09:00 / Siang 12:00 / Malam 20:00 / Tunda dulu |
+| DM handler | Saya balas sendiri / Birunix balas pakai template / Tunda dulu |
+| Workflow diffs | Setujui / Belum |
+| Secret K8S_RENDER_TOKEN | Sudah saya buat / Belum |
+| Metrik Reels | Birunix cek via browser / Saya cek sendiri |
+| GC node-side | Jalankan §3A+§3B sekarang / Nanti saja / Tolak CronJob GC |
+
+Pertanyaan-pertanyaan ini adalah keputusan yang selama ini tertunda di
+§3.4 (secret + diff workflow), §3.6 butir 4 (migrasi render), §1.14/§1.15
+(HPA, Descheduler, Rancher), plus pertanyaan operasional Reels (jam slot
+2, DM handler, metrik, GC node-side). Jawaban lewat tombol Command
+Center tercatat ke `decisions.json` dan dibaca bridge
+(`hq-bridge-apply-decisions`).
+
+`PROJECTS` — dihapus `Rasa Bersalah 3D stick-figure story` (Cerita
+Keresahan DIBUANG 27 Nov 01:54 — di-handle akun Muse lain). Diperbarui:
+`Kiko dan Gelas yang Pecah` → "Dongeng animasi tema Kejujuran — PARKED,
+menunggu arahan gaya dari user."; `IT tips Reels for @byhkab.dev` →
+"Reels @byhkab.dev — Build. Learn. Automate. Share. (durasi fleksibel
+45 dtk–2 mnt)" (aturan durasi user 27 Nov 01:26). Sisa proyek dibiarkan.
+
+**Deploy** — alur `deploy-cc-v141.sh` yang sudah ada (scp kode +
+manifest, ConfigMap `hq-apps-code`, apply manifest, rollout restart
+`deploy/hq-apps`). Catatan: koneksi SSH putus di tengah `rollout status`
+— itu batasan tunnel proxy yang sudah dikenal (drop setelah ~30 dtk
+tanpa output), bukan kegagalan deploy; rollout diverifikasi terpisah:
+pod baru `hq-apps-55f884dbbb-cg98j` 1/1 Running, 0 restart.
+
+**Verifikasi live (semua PASS):**
+
+- `/health` → 200, `version: 1.4.1`.
+- Login → 302 + session cookie; `/command-center` → 200 (17.644 B):
+  ke-10 target baru + `Prompt Orchestra` tampil; 3 target lama hilang;
+  proyek `Rasa Bersalah` hilang; desc Kiko (PARKED) + Reels (durasi
+  fleksibel) tampil. Ringkasan halaman: **10 menunggu keputusan**.
+- `/kanban` → 200 + marker v1.4.0 (regresi).
+- `/api/board` → 200; kartu **identik** sebelum/sesudah deploy: 26 kartu
+  (14 done, 3 archived, 3 backlog, 2 blocked, 2 in_progress, 1
+  in_review, 1 todo). Kanban tidak berubah.
+- `/api/decisions` → 200; 35 total, 0 unapplied — tidak berubah.
+- `office3d` → 200 (tidak terganggu).
+
 ## 2. Keputusan desain: pisah VoiceStudio dan render Job
 
 Diputuskan pemilik server 26 November 2026 ~01:34 ("Pisah seperti saranmu"):
@@ -1034,7 +1106,9 @@ sudo /usr/local/bin/kubectl rollout status deploy/voicestudio -n render
   tapi **belum di-push — menunggu persetujuan pemilik** sebelum workflow
   diubah. Guard yang disiapkan di diff: step TTS tanpa hook whisper→Remotion
   harus FAIL (hook itu milik produksi), dan whisper yang gagal harus FAIL
-  (jangan lanjut dengan timing lama).
+  (jangan lanjut dengan timing lama). Pertanyaan ini kini juga tampil di
+  Command Center VPS (27 Nov, §1.16) — jawaban lewat tombol tercatat ke
+  `decisions.json` dan dibaca bridge.
 
 ### 3.5 Keputusan rute runner → API server + eksposur VoiceStudio
 
@@ -1099,7 +1173,8 @@ Menunggu keputusan pemilik (setelah §1.9 dan §1.10):
    baru di vps-38 + salin proyek 406 MB + image pull. **Prasyarat
    jaringan kini terpenuhi (§1.15)** — DNS bypass Opsi B (§1.6)
    kemungkinan sudah tidak diperlukan lagi. Keputusan menunggu pemilik;
-   sampai diputuskan, render tetap di pod standby vps-29.
+   sampai diputuskan, render tetap di pod standby vps-29. Pertanyaan ini
+   kini tampil di Command Center (27 Nov, §1.16).
 
 ## 4. Ringkasan
 
