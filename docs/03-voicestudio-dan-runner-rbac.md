@@ -5,7 +5,9 @@ office-3d SELESAI 26 November 2026 ~01:43–02:09; lisensi diterima + voice
 diimpor + DNS bypass + STT + profil performa SELESAI 26 Nov ~09:36–11:46;
 hasil GGUF SELESAI 26 Nov (§1.10) — node VPS tidak bisa menjalankan engine
 TTS Indonesia apa pun (Xeon E5620 tanpa AVX, RAM 7,75 GB); uji Laras TTS
-SELESAI 26 Nov (§1.11) — biner mati SIGILL, AVX2 juga menutup jalur ini.**
+SELESAI 26 Nov (§1.11) — biner mati SIGILL, AVX2 juga menutup jalur ini;
+rebuild Laras di VPS GAGAL 26 Nov (§1.12) — pivot: Laras JALAN di sandbox
+Muse, render tetap di VPS.**
 Yang MENUNGGU tangan/keputusan pemilik server dipisah tegas di
 §3 — jangan dicampur dengan yang sudah selesai. Tidak ada perubahan di klaster
 pada penulisan dokumen ini; semua yang di bawah adalah yang benar-benar
@@ -126,7 +128,9 @@ gagal**: `POST /v1/audio/speech` (voice gufron) → HTTP 503 tepat di 600,28 dtk
 mengandalkan VoiceStudio laptop sampai ada keputusan mesin baru (§3.6).
 Percobaan engine ringan GGUF (§1.10) juga gagal di hardware ini — vonisnya
 di §1.10 — dan uji Laras TTS (§1.11) juga gagal: biner mati SIGILL karena
-AVX2. Opsi lanjut di §3.6.
+AVX2. Rebuild Laras dari source di VPS pun gagal (§1.12) — tapi Laras
+**jalan di sandbox Muse** (§1.12), dan itulah jalur narasi saat ini.
+Opsi lanjut di §3.6.
 
 ### 1.2 ServiceAccount + RBAC minimal untuk GitHub runner
 
@@ -448,6 +452,88 @@ gerbang lisensi). Opsi lanjut ada di §3.6. Manifest lokal Job + PVC +
 driver ada di workspace (`vps-render/laras-test-gufron-job.yaml`,
 `laras-data-pvc.yaml`, `laras-run-step1.sh`).
 
+### 1.12 Rebuild Laras di VPS gagal — Laras JALAN di sandbox Muse (pivot 26 Nov 18:49)
+
+Lanjutan §1.11. Opsi rebuild dari source (§3.6 butir 4) diuji — dan gugur.
+Keputusan pemilik 26 Nov 18:49: **Laras dipindah ke sandbox Muse; render
+tetap di VPS.**
+
+#### Rebuild dari source di VPS — GAGAL
+
+Job `laras-build` (ns `render`, vps-38; build ONNX Runtime dari source
+dengan `target-cpu=x86-64`, mengikuti rencana §1.11) **Failed setelah
+149 menit** dengan error:
+
+```text
+could not find native static library 're2'
+```
+
+— gagal saat `cargo build` paket `ort-sys` (dependensi build ONNX Runtime
+dari source membutuhkan pustaka native `re2` yang tidak tersedia di
+lingkungan build). Job `laras-build` + pod `debug-find` sudah dihapus.
+PVC `laras-build` (30 Gi, berisi hasil kompilasi ORT) dan `laras-data`
+(model + ref) **dibiarkan** — bisa dipakai lagi bila rebuild dilanjutkan
+suatu saat. **Vonis: jalur rebuild Laras di node VPS ini tertutup**
+(bukan lagi "belum diuji" seperti di §3.6 sebelumnya).
+
+#### Pivot — install Laras di sandbox Muse
+
+Biner **prebuilt 0.2.1 (27,6 MB)**, diekstrak dari image
+`ghcr.io/urdemonlord/laras-tts:0.2.1` lewat registry API tanpa docker,
+**JALAN di sandbox** — CPU sandbox AMD EPYC punya AVX2, jadi masalah ISA
+yang membunuh biner yang sama di VPS (§1.11) tidak ada di sini. Model
+`anak10thn/pocket-tts-indonesian` yang sama (9 berkas, ±160 MB, sha256
+lolos) dipakai ulang.
+
+| Item | Nilai |
+| --- | --- |
+| Lokasi install (persisten, tahan ganti VM) | `~/workspace/laras-tts/` (193 MB) |
+| Biner | `bin/laras` — prebuilt 0.2.1, 27,6 MB |
+| Model | `data/models/` — 9 berkas `anak10thn/pocket-tts-indonesian` |
+| Referensi voice | `data/ref/` — 4 ref MP3 asli + versi trim 15 detik (`*-ref-15s.mp3`) |
+| Server | `http://127.0.0.1:8080`, starter `start-server.sh`, detail `README.md` |
+| Verifikasi server | `GET /health` → 200 `{"ok":true,"engine":"laras","version":"0.2.1","lang":"id",...}` |
+
+#### Gate test + uji kualitas — LULUS
+
+Gate test (Zenith, 26 Nov 19:53): gufron, `takes=1`, kalimat yang sama
+dengan §1.11 → **WAV 10,40 dtk, 499.244 B — LULUS**. Uji kualitas
+(takes=3, teks klip 0 T-013) → **4/4 berhasil**:
+
+| Voice | Durasi WAV | Ukuran |
+| --- | --- | --- |
+| gufron | 28,00 dtk | 1.344.044 B |
+| anak-anak | 29,68 dtk | 1.424.684 B |
+| resah | 15,68 dtk | 752.684 B |
+| my voice | 6,40 dtk | 307.244 B |
+
+WAV di workspace (`vps-render/voice-tests/test-laras-*-klip0-takes3.wav`
++ `test-laras-gufron-takes1.wav`) — durasi/ukuran terverifikasi via
+ffprobe. Catatan: kemiripan suara + kelengkapan kata masih perlu cek
+dengar manusia (seperti direncanakan di §1.11 langkah 2).
+
+#### Pelajaran operasional (sandbox)
+
+- **Ref panjang bikin server hang:** ref anak-anak 48,6 dtk → sintesis
+  `takes=3` menggantung sampai timeout 300 dtk tanpa output. Trim ke
+  15 detik (sesuai syarat cloning 10–15 dtk) → selesai ±55 dtk. **Selalu
+  pakai `*-ref-15s.mp3`** untuk anak-anak/resah/my-voice; gufron
+  (21,7 dtk) aman.
+- **Kecepatan bicara beda jauh antar voice untuk teks yang sama:**
+  my-voice 6,4 dtk vs gufron 28,0 dtk — durasi narasi per voice harus
+  diukur per voice, jangan diasumsikan sama.
+- **Server sempat mati 2× saat host sandbox kehabisan RAM** (available
+  sempat 571 MB) — proses hilang tanpa pesan error. Restart pakai
+  `start-server.sh`; tidak ada data hilang (model + ref di disk).
+- Kecepatan di sandbox (±1,5 shared CPU): RTF ±2–3× — 1 klip ±10 dtk
+  ≈ 30 dtk wall `takes=1`, ±45–55 dtk wall `takes=3`.
+
+**Keadaan akhir: narasi kini lewat Laras di sandbox Muse; render tetap
+di VPS, tidak berubah.** VoiceStudio laptop tetap ada sebagai cadangan.
+Sisa yang menunggu di §3.6 untuk mesin TTS VPS (upgrade RAM / node baru)
+tidak lagi mendesak — Laras sandbox adalah jalur produksi narasi saat ini.
+
+
 ## 2. Keputusan desain: pisah VoiceStudio dan render Job
 
 Diputuskan pemilik server 26 November 2026 ~01:34 ("Pisah seperti saranmu"):
@@ -558,25 +644,30 @@ Dua keputusan yang saling terkait, keduanya belum diputuskan:
 
 Menunggu keputusan pemilik (setelah §1.9 dan §1.10):
 
-1. **Mesin TTS VPS — jalur GGUF SUDAH TERJAWAB (§1.10) dan jalur Laras
-   SUDAH TERJAWAB (§1.11): tidak bisa di node ini.** Opsi (a) engine ringan
-   GGUF / Supertonic-3 gugur — bukan soal engine, tapi CPU Xeon E5620 tanpa
-   AVX dan RAM 7,75 GB. Laras (§1.11) gugur di ISA yang sama: biner ONNX
-   Runtime prebuilt butuh AVX2 (SIGILL, exit 132) — upgrade RAM tidak
-   menolong Laras. Opsi yang tersisa:
-   (1) **narasi via VoiceStudio laptop (RTX 3050, terbukti jalan)** — jalur
-   yang dipakai sampai ada keputusan lain; (2) **upgrade RAM VPS** —
-   dots / VoxCPM2 baru bisa LOAD, tapi kecepatan di E5620 kemungkinan tetap
-   terlalu lambat untuk narasi 60 dtk; (3) **node baru dengan AVX2 + RAM
-   lebih besar** — membuka jalur GGUF cepat dan jalur Laras; (4) **rebuild
-   Laras dari source dengan `target-cpu=x86-64`** — belum diuji, ONNX
-   Runtime dari source tanpa AVX2 mungkin jalan, tapi biaya build + hasil
-   belum terbukti; (5) **cloud voice cloning** — riset 26 Nov 13:18:
+1. **Mesin TTS VPS — jalur GGUF SUDAH TERJAWAB (§1.10), jalur Laras
+   SUDAH TERJAWAB (§1.11), rebuild Laras SUDAH TERJAWAB (§1.12): tidak
+   bisa di node ini. Narasi kini lewat Laras di sandbox Muse (§1.12) —
+   pivot pemilik 26 Nov 18:49 — jadi pertanyaan mesin TTS VPS tidak lagi
+   mendesak.** Opsi (a) engine ringan GGUF / Supertonic-3 gugur — bukan
+   soal engine, tapi CPU Xeon E5620 tanpa AVX dan RAM 7,75 GB. Laras
+   (§1.11) gugur di ISA yang sama: biner ONNX Runtime prebuilt butuh AVX2
+   (SIGILL, exit 132) — upgrade RAM tidak menolong Laras. Opsi yang
+   tersisa:
+   (1) **Laras di sandbox Muse (§1.12)** — jalur narasi yang dipakai
+   sekarang; (2) **narasi via VoiceStudio laptop (RTX 3050, terbukti
+   jalan)** — cadangan bila sandbox bermasalah; (3) **upgrade RAM VPS** —
+   dots / VoxCPM2 baru bisa LOAD, tapi kecepatan di E5620 kemungkinan
+   tetap terlalu lambat untuk narasi 60 dtk; (4) **node baru dengan AVX2
+   + RAM lebih besar** — membuka jalur GGUF cepat dan jalur Laras di VPS;
+   (5) **rebuild Laras dari source dengan `target-cpu=x86-64` — SUDAH
+   DIUJI, GAGAL (§1.12)**: Job `laras-build` Failed 149 menit, error
+   `could not find native static library 're2'` saat `cargo build`
+   `ort-sys`; (6) **cloud voice cloning** — riset 26 Nov 13:18:
    ElevenLabs Starter $6/bln (IVC, 30 rb kredit) atau Fish Audio
    (cloning gratis, Plus $15/bln), ref MP3 yang ada langsung bisa dipakai
    di Fish; keputusan dari uji dengar. Opsi (c) buru budget override
-   600 dtk dan (d) torch-compile tetap tidak layak / payoff tak pasti seperti
-   sebelumnya.
+   600 dtk dan (d) torch-compile tetap tidak layak / payoff tak pasti
+   seperti sebelumnya.
 2. **Perbaikan akar jaringan pod vps-38** (§1.6): pod-to-pod tetap rusak;
    perbaikan butuh akses pemilik ke vps-38 (cek `iptables FORWARD`,
    `bridge fdb`, `ip neigh`) atau persetujuan eksplisit untuk rute
@@ -602,10 +693,13 @@ Menunggu keputusan pemilik (setelah §1.9 dan §1.10):
   vonis: tidak ada engine TTS Indonesia yang bisa jalan di node ini. Uji Laras
   TTS (§1.11) juga gugur di hardware yang sama — biner ONNX Runtime prebuilt
   butuh AVX2 (SIGILL, exit 132); model ±160 MB + 4 ref MP3 tersimpan di PVC
-  `laras-data` 3Gi (masih ada, PV terikat vps-38). Opsi Laras yang tersisa:
-  rebuild dari source `target-cpu=x86-64` (belum diuji) atau node baru AVX2;
-  alternatif cloud (ElevenLabs/Fish) ada di §3.6. Narasi
-  tetap lewat VoiceStudio laptop sampai ada keputusan mesin baru (§3.6).
+  `laras-data` 3Gi (masih ada, PV terikat vps-38). Rebuild Laras dari source
+  di VPS juga GAGAL (§1.12: Job `laras-build` Failed 149 menit, error
+  `could not find native static library 're2'`). **Pivot pemilik 26 Nov
+  18:49: Laras JALAN di sandbox Muse** — biner prebuilt 0.2.1 jalan (CPU
+  AMD EPYC punya AVX2), gate test + uji kualitas 4/4 voice lulus (§1.12);
+  render tetap di VPS. Narasi kini lewat Laras sandbox; VoiceStudio laptop
+  tetap cadangan; alternatif cloud (ElevenLabs/Fish) ada di §3.6.
 - **Jaringan pod vps-38 rusak di data plane** (§1.6): pod-to-pod mati, DNS
   via kube-dns mati; bypass DNS per-pod adalah workaround, bukan perbaikan
   akar.
