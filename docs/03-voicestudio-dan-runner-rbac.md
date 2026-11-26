@@ -1,10 +1,12 @@
 # VoiceStudio, RBAC Runner & Perbaikan Penjadwalan
 
 Status: **Deployment VoiceStudio + SA/RBAC runner + nodeSelector template + pin
-office-3d SELESAI 26 November 2026 ~01:43–02:09**; tiga hal yang MENUNGGU tangan
-pemilik server dipisah tegas di §3 — jangan dicampur dengan yang sudah selesai.
-Tidak ada perubahan di klaster pada penulisan dokumen ini; semua yang di bawah
-adalah yang benar-benar terjadi dan terverifikasi pada jam tersebut.
+office-3d SELESAI 26 November 2026 ~01:43–02:09; lisensi diterima + voice
+diimpor + DNS bypass + STT + profil performa SELESAI 26 Nov ~09:36–11:46**
+(§1.6–§1.9). Yang MENUNGGU tangan/keputusan pemilik server dipisah tegas di
+§3 — jangan dicampur dengan yang sudah selesai. Tidak ada perubahan di klaster
+pada penulisan dokumen ini; semua yang di bawah adalah yang benar-benar
+terjadi dan terverifikasi pada jam tersebut.
 
 ## 1. Yang SUDAH selesai
 
@@ -24,6 +26,9 @@ render = satu Job per video yang dihapus setelah selesai (§2).
 | Env | `OMNIVOICE_API_KEY` dari Secret `voicestudio-api-key` (`secretKeyRef`) |
 | Pod | 1/1 Running di **vps-38** |
 | Limit memori | 4 GiB (peak generate terukur 3,4 GiB) |
+| DNS pod | `dnsPolicy: None` + nameserver 8.8.8.8 / 1.1.1.1 (§1.6) |
+| STT | faster-whisper `base` terinstal (§1.7) |
+| Profil TTS | `tier=fast` (§1.8) |
 
 Ringkasan manifest (nilai sensitif hanya sebagai placeholder — lihat §3.3):
 
@@ -55,6 +60,11 @@ spec:
     spec:
       nodeSelector:
         workload: render
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+        - 8.8.8.8
+        - 1.1.1.1
       containers:
       - name: voicestudio
         image: ghcr.io/debpalash/voicestudio:stable
@@ -88,6 +98,15 @@ GET /health → 200 {"status":"ok","device":"cpu","engine":"omnivoice","version"
 GET /v1/audio/voices → 200 (14 alias OpenAI + demo0001)
 ```
 
+Verifikasi (26 Nov ~11:46, setelah DNS bypass §1.6):
+
+```text
+getent hosts huggingface.co (dari dalam pod) → exit 0
+curl https://huggingface.co → HTTP/2 200
+GET /health → 200 (pod baru, setelah restart)
+weights ~3,1 GB terunduh ke HF_HOME di PVC
+```
+
 **Koreksi angka:** image VoiceStudio terukur **~5,6 GiB**, bukan 17 GB seperti
 perkiraan di [docs/02-garbage-collection-optimasi.md](02-garbage-collection-optimasi.md).
 Angka 17 GB itu perkiraan sebelum image ter-pull dan **tidak lagi dipakai** —
@@ -95,8 +114,11 @@ termasuk untuk hitungan prune di docs/02 §3A (image VoiceStudio tetap ikut
 terhapus bila di-prune, karena Deployment-nya tidak selalu punya pod yang jalan,
 tapi pull ulangnya ~18 menit, bukan "10+ menit untuk 17 GB").
 
-**Yang BELUM bisa dilakukan** meski servernya sudah jalan: generate suara
-(`POST /v1/audio/speech` → 403, §3.1) dan impor 3 voice dari laptop (§3.2).
+**Status generate suara (26 Nov ~11:46):** lisensi sudah diterima (§3.1) dan
+4 voice sudah diimpor (§3.2), weights sudah terunduh — tapi **test generate
+gagal**: `POST /v1/audio/speech` (voice gufron) → HTTP 503 tepat di 600,28 dtk
+(§1.9). TTS OmniVoice di CPU VPS **tidak layak produksi**; narasi tetap
+mengandalkan VoiceStudio laptop sampai ada keputusan mesin baru (§3.6).
 
 ### 1.2 ServiceAccount + RBAC minimal untuk GitHub runner
 
@@ -180,6 +202,113 @@ Kesimpulan: **rute runner → API via IP publik BELUM terbukti**. `--insecure-sk
 bukan solusi — TLS-nya sudah berhasil, yang gagal adalah respons HTTP-nya.
 Diagnosa lanjut + keputusan rute ada di §3.5.
 
+### 1.6 Opsi B — DNS bypass pod VoiceStudio (diterapkan 26 Nov ~10:51–11:46)
+
+**Latar — data plane jaringan pod vps-38 rusak** (diagnosis Zenith, 26 Nov
+10:12): pod di vps-38 tidak bisa mencapai IP pod mana pun, satu node maupun
+lintas node — akibatnya DNS via kube-dns (`10.43.0.10`) gagal total
+(`getent` menggantung, `httpx.ConnectError: Temporary failure in name
+resolution`). Yang tetap jalan: pod→gateway, pod→IP node, dan pod→internet
+langsung, termasuk DNS mentah UDP ke 8.8.8.8 / 1.1.1.1. Restart k3s-agent di
+vps-38 (10:38) **tidak memperbaiki** — pod baru pun gagal dengan pola
+identik; flannel start bersih pasca-restart, jadi hipotesis urutan init
+iptables/flannel melemah. Hipotesis berikutnya (belum terverifikasi): aturan
+iptables FORWARD / kube-router vps-38 yang spesifik-destinasi; bridge/VXLAN
+FDB stale; `modprobe nft-expr-counter` gagal. Catatan: **render Job di
+vps-38 yang butuh DNS kena masalah yang sama.**
+
+Keputusan pemilik server 26 Nov 10:51: **Opsi B — bypass kube-dns khusus pod
+VoiceStudio** (tercepat; Opsi A perbaiki akar sudah dicoba lewat restart
+agent dan gagal; Opsi C pre-seed weights tidak dipilih).
+
+Perubahan pada Deployment `voicestudio` (ns `render`):
+
+```yaml
+spec:
+  template:
+    spec:
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+        - 8.8.8.8
+        - 1.1.1.1
+```
+
+**Prosedur penerapan — scale-to-0 → patch → scale-to-1, bukan rollout
+restart biasa.** Alasannya insiden ~10:41: sebuah rollout sempat deadlock
+`CrashLoopBackOff` dengan `DataDirectoryBusy` — pod lama masih memegang lease
+`/app/omnivoice_data` sementara pod baru butuh direktori yang sama. Men-scale
+ReplicaSet lama ke 0 dulu memastikan tidak ada dua pod yang berebut lease.
+Manifest lokal `voicestudio-vps38.yaml` diperbarui agar sama dengan live
+state (jangan sampai apply berikutnya mengembalikan setting lama).
+
+**Konsekuensi yang diharapkan, bukan kegagalan:** dengan `dnsPolicy: None`,
+pod **tidak lagi resolve nama `*.svc.cluster.local`** — `getent
+kubernetes.default.svc.cluster.local` gagal adalah perilaku yang benar.
+VoiceStudio tidak membutuhkannya (hanya butuh huggingface.co + API
+eksternal). Service tetap merutekan trafik ke pod seperti biasa (itu urusan
+kube-proxy di node, bukan DNS pod).
+
+Verifikasi (26 Nov ~11:46): `getent hosts huggingface.co` → exit 0;
+`curl https://huggingface.co` → HTTP/2 200; weights **~3,1 GB terunduh** ke
+`HF_HOME=/app/omnivoice_data/huggingface` di PVC (cache bertahan restart
+pod).
+
+**Batasan:** ini workaround per-pod, **bukan perbaikan jaringan vps-38** —
+pod-to-pod tetap rusak. Perbaikan akar masih menunggu (§3.6).
+
+### 1.7 STT faster-whisper-base terinstal di VoiceStudio VPS
+
+Model STT `faster-whisper-base` terinstal di VoiceStudio VPS (26 Nov ~11:46):
+
+| Item | Nilai |
+| --- | --- |
+| Model | faster-whisper `base` |
+| Ukuran | 147.886.409 B (~141 MiB), 6 file |
+| Status | `installed: true` |
+
+Transkripsi untuk passage-selection tercatat berjalan di log pod — STT di
+VPS sudah bisa dipakai (misalnya untuk memilih passage referensi voice),
+terpisah dari masalah TTS di §1.9.
+
+### 1.8 Profil performa `tier=fast` untuk TTS
+
+Diatur 26 Nov ~11:46 via API VoiceStudio:
+
+```bash
+PUT /api/settings/performance-profile {"tier":"fast","family":"tts"}
+```
+
+Hasil: `effective.tts: fast` — diffusion steps **8** (dari 16),
+postprocess **false**; profil global tetap `balanced` (hanya keluarga TTS
+yang diubah).
+
+**Bertahan setelah restart pod:** setting tersimpan sebagai
+`overrides: {tts: "fast"}`, jadi pod baru tetap memakai tier fast tanpa
+setel ulang. Catatan: tier fast mempercepat generate, tapi **tidak mengubah
+kesimpulan §1.9** — bottleneck-nya CPU, bukan jumlah langkah.
+
+### 1.9 Hasil test generate — TTS OmniVoice CPU VPS tidak layak produksi
+
+Test generate pertama setelah DNS bypass (26 Nov ~11:46, voice gufron,
+kalimat ~4 detik):
+
+```text
+POST /v1/audio/speech → HTTP 503 tepat di 600,28 dtk
+```
+
+- **Budget eksekusi server 600 dtk terlampaui:** cold load model ~3,5 mnt +
+  generasi ~11 mnt untuk kalimat ~4 dtk (**~165x real-time**).
+- CPU terpakai hanya **~3,4 core dari limit 7** — engine tidak memanfaatkan
+  semua core yang tersedia.
+- **3 voice lain tidak dicoba** — bottleneck yang sama berlaku untuk semuanya.
+- `voice-tests/` tetap kosong: **tidak ada WAV yang dihasilkan**.
+- Job yatim sempat wedged lalu dibereskan via restart pod; sistem bersih.
+
+**Kesimpulan: OmniVoice di CPU VPS tidak layak produksi.** Opsi lanjut
+menunggu keputusan pemilik server (§3.6); sampai ada keputusan, narasi
+tetap lewat VoiceStudio laptop (rute terbukti jalan).
+
 ## 2. Keputusan desain: pisah VoiceStudio dan render Job
 
 Diputuskan pemilik server 26 November 2026 ~01:34 ("Pisah seperti saranmu"):
@@ -201,56 +330,51 @@ Diputuskan pemilik server 26 November 2026 ~01:34 ("Pisah seperti saranmu"):
 > Bagian ini **bukan** yang sudah selesai. Jangan dianggap beres sebelum ada
 > verifikasi baru.
 
-### 3.1 Terima 2 lisensi model (keputusan pemilik server, bukan agen)
+### 3.1 Terima 2 lisensi model — SELESAI 26 Nov 09:36:30
 
-`POST /v1/audio/speech` masih gagal:
+Diterima **pemilik server sendiri** (bukan agen — menerima lisensi adalah
+**persetujuan legal**, agen tidak boleh menerimanya atas nama pemilik):
 
-```text
-HTTP 403 model_licence_required
-```
+- `k2-fsa/OmniVoice` — lisensi **CC-BY-NC**,
+  fingerprint `v2:d938ea928581624d5732507057d8530320f638ac61426165cbd5abe67be5c9bc`
+- `eustlb/higgs-audio-v2-tokenizer`,
+  fingerprint `v2:6b442e435fd392f7726e7c44a30da71bba23adecaabe4c8da725cb30579ecff1`
 
-Dua model belum diterima lisensinya:
+Verifikasi: keduanya `accepted: true`,
+`accepted_at: 2026-11-26T05:36:30Z`, fingerprint cocok. Efeknya:
+`POST /v1/audio/speech` tidak lagi 403 `model_licence_required` — bloker
+berikutnya adalah unduhan weights (§1.6) dan batas eksekusi CPU (§1.9).
+Lisensi bersifat **per-instance** (lisensi laptop tidak berlaku untuk VPS).
 
-- `k2-fsa/OmniVoice` — lisensi **CC-BY-NC**
-- `eustlb/higgs-audio-v2-tokenizer`
+### 3.2 Impor voice dari laptop — SELESAI 26 Nov ~02:28–02:32
 
-Menerima lisensi adalah **persetujuan legal** — agen tidak boleh menerimanya
-atas nama pemilik. Pemilik menerimanya sendiri di Model Catalogue (Hugging
-Face), lalu test generate diulang. Sampai lisensi diterima, `/health` dan
-`/v1/audio/voices` jalan, tapi **tidak ada suara yang bisa di-generate**.
+4 voice laptop terimpor ke VPS. Rutenya (terverifikasi saat aplikasi desktop
+laptop jalan): ekspor via `GET /profiles` + `GET /profiles/{id}/audio`
+(satu file referensi MP3 + `ref_text` per voice), impor via `POST /profiles`
+multipart (`name`, `ref_audio=@file.mp3`, `ref_text`,
+`language=Indonesian`).
 
-### 3.2 Buka aplikasi desktop VoiceStudio di laptop
+| Voice | ID di VPS |
+| --- | --- |
+| gufron | `4b11bf25` |
+| anak-anak | `50290a19` |
+| resah | `2d15d02a` |
+| my voice | `8cfb0d78` |
 
-Impor 3 voice (`my voice`, `resah`, `anak-anak`) terblokir karena aplikasi
-desktop VoiceStudio di laptop **tidak berjalan**: `GET /profiles` via tunnel
-proxy 3130 gagal 5x.
+Verifikasi: `GET /v1/audio/voices` → **18 voice total** (4 impor + demo0001
++ 13 alias OpenAI). File referensi MP3 tersimpan di workspace
+(`voice-export/`). Hasil test generate per voice ada di §1.9.
 
-Langkah pemilik: buka aplikasinya di laptop, pastikan laptop menyala, lalu
-retry impor. Rutenya (sudah terverifikasi saat aplikasi jalan):
+### 3.3 Secret `voicestudio-api-key` — DIPUTUSKAN pemilik 26 Nov 02:24
 
-- Ekspor dari laptop: `GET /profiles` + `GET /profiles/{id}/audio`
-  (satu file referensi MP3 ≤20 detik + `ref_text` per voice).
-- Impor ke VPS: `POST /profiles` multipart (`name`, `ref_audio=@file.mp3`,
-  `ref_text`, `language=Indonesian`).
-- Verifikasi: `GET /v1/audio/voices` + 1 test generate pendek per voice.
+Secret di klaster berisi teks placeholder contoh perintah
+(`<kunci-pilihan-user>`), dan **pemilik menerima placeholder itu sebagai
+kunci** — jangan dibuat ulang tanpa perintahnya. GitHub secret
+`VOICESTUDIO_API_KEY` (dibuat 26 Nov 01:46, terverifikasi ada via API)
+harus berisi string yang **sama persis**; kalau beda, server menolak
+dengan 401.
 
-### 3.3 Buat ulang Secret `voicestudio-api-key` dengan kunci asli
-
-Secret di klaster saat ini **berisi teks placeholder contoh perintah**
-(`<kunci-pilihan-user>`), bukan kunci asli — pod yang jalan sekarang memakai
-kunci placeholder itu. Pemilik membuat ulang Secret dengan kunci pilihannya,
-lalu menyamakannya dengan GitHub secret `VOICESTUDIO_API_KEY` (sudah dibuat
-26 Nov 01:46, terverifikasi ada via API — nilainya tidak bisa diverifikasi,
-kecocokannya terbukti lewat test generate nanti).
-
-```bash
-# di vps-29 — ganti <kunci-pilihan-user> dengan kunci yang dipilih
-sudo /usr/local/bin/kubectl create secret generic voicestudio-api-key -n render \
-  --from-literal=api-key='<kunci-pilihan-user>' \
-  --dry-run=client -o yaml | sudo /usr/local/bin/kubectl apply -f -
-```
-
-Setelah Secret diganti, pod harus di-restart supaya membaca env baru
+Bila suatu saat Secret diganti, pod harus di-restart supaya membaca env baru
 (env dari `secretKeyRef` hanya dibaca saat pod start — Secret yang diubah
 tidak mengubah pod yang sudah jalan):
 
@@ -291,12 +415,34 @@ Dua keputusan yang saling terkait, keduanya belum diputuskan:
    SSH/port-forward. Keputusan ini menentukan endpoint final langkah TTS di
    workflow (§3.4) — jangan kunci endpoint di workflow sebelum diputuskan.
 
+### 3.6 Keputusan lanjut: mesin TTS VPS + perbaikan akar jaringan vps-38
+
+Menunggu keputusan pemilik (setelah §1.9):
+
+1. **Mesin TTS VPS.** OmniVoice CPU tidak layak produksi. Opsi: (a) engine
+   ringan GGUF / Supertonic-3 — voice clone kemungkinan harus dibuat ulang,
+   lisensi diterima sendiri; (b) fallback narasi ke VoiceStudio laptop
+   (rute terbukti jalan); (c) buru budget override 600 dtk — tetap tidak
+   layak produksi; (d) torch-compile — payoff tak pasti.
+2. **Perbaikan akar jaringan pod vps-38** (§1.6): pod-to-pod tetap rusak;
+   perbaikan butuh akses pemilik ke vps-38 (cek `iptables FORWARD`,
+   `bridge fdb`, `ip neigh`) atau persetujuan eksplisit untuk rute
+   privileged. Sampai diperbaiki, Job render di vps-38 yang butuh DNS /
+   pod-to-pod kena masalah yang sama — DNS bypass per-pod (§1.6) adalah pola
+   yang dipakai bila ada workload lain yang butuh nama eksternal.
+
 ## 4. Ringkasan
 
 - **VoiceStudio jalan di vps-38** (Deployment + PVC 10Gi + Service :3900,
-  pod 1/1 Running, `/health` 200) — tapi **belum bisa generate suara**:
-  lisensi 2 model belum diterima (§3.1), 3 voice belum diimpor karena aplikasi
-  laptop tidak jalan (§3.2), dan Secret klaster masih berisi placeholder (§3.3).
+  pod 1/1 Running, `/health` 200, DNS bypass §1.6, STT faster-whisper-base
+  §1.7, profil TTS `tier=fast` §1.8) — lisensi diterima (§3.1), 4 voice
+  diimpor (§3.2), weights terunduh. **Tapi TTS belum bisa dipakai produksi:**
+  test generate gufron → HTTP 503 di 600,28 dtk, CPU VPS ~165x real-time
+  (§1.9). Narasi tetap lewat VoiceStudio laptop sampai ada keputusan mesin
+  baru (§3.6).
+- **Jaringan pod vps-38 rusak di data plane** (§1.6): pod-to-pod mati, DNS
+  via kube-dns mati; bypass DNS per-pod adalah workaround, bukan perbaikan
+  akar.
 - **Runner GitHub punya akses minimal** (SA + Role hanya Job/Pod di ns `render`)
   — token dibaca pemilik sendiri untuk `K8S_RENDER_TOKEN` (§3.4).
 - **Penjadwalan diperbaiki di dua tempat:** 3 template Job render di-pin ke
