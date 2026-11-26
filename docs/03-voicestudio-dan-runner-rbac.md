@@ -2,8 +2,10 @@
 
 Status: **Deployment VoiceStudio + SA/RBAC runner + nodeSelector template + pin
 office-3d SELESAI 26 November 2026 ~01:43–02:09; lisensi diterima + voice
-diimpor + DNS bypass + STT + profil performa SELESAI 26 Nov ~09:36–11:46**
-(§1.6–§1.9). Yang MENUNGGU tangan/keputusan pemilik server dipisah tegas di
+diimpor + DNS bypass + STT + profil performa SELESAI 26 Nov ~09:36–11:46;
+hasil GGUF SELESAI 26 Nov (§1.10) — node VPS tidak bisa menjalankan engine
+TTS Indonesia apa pun (Xeon E5620 tanpa AVX, RAM 7,75 GB).**
+Yang MENUNGGU tangan/keputusan pemilik server dipisah tegas di
 §3 — jangan dicampur dengan yang sudah selesai. Tidak ada perubahan di klaster
 pada penulisan dokumen ini; semua yang di bawah adalah yang benar-benar
 terjadi dan terverifikasi pada jam tersebut.
@@ -23,9 +25,9 @@ render = satu Job per video yang dihapus setelah selesai (§2).
 | Image | `ghcr.io/debpalash/voicestudio:stable` (debpalash/VoiceStudio, AGPL-3.0) |
 | Ukuran image terukur | **~5,6 GiB**; pull pertama **18 mnt 23 dtk** |
 | Service | `voicestudio`, ClusterIP, port **3900** |
-| Env | `OMNIVOICE_API_KEY` dari Secret `voicestudio-api-key` (`secretKeyRef`) |
+| Env | `OMNIVOICE_API_KEY` dari Secret `voicestudio-api-key` (`secretKeyRef`); `OMNIVOICE_DOTS_TTS_PRECISION=bfloat16` (§1.10) |
 | Pod | 1/1 Running di **vps-38** |
-| Limit memori | 4 GiB (peak generate terukur 3,4 GiB) |
+| Limit memori | 7 GiB sejak §1.10 (dari 4 GiB; peak generate OmniVoice terukur 3,4 GiB) |
 | DNS pod | `dnsPolicy: None` + nameserver 8.8.8.8 / 1.1.1.1 (§1.6) |
 | STT | faster-whisper `base` terinstal (§1.7) |
 | Profil TTS | `tier=fast` (§1.8) |
@@ -76,9 +78,11 @@ spec:
             secretKeyRef:
               name: voicestudio-api-key
               key: api-key
+        - name: OMNIVOICE_DOTS_TTS_PRECISION
+          value: bfloat16
         resources:
           limits:
-            memory: 4Gi
+            memory: 7Gi
 ---
 apiVersion: v1
 kind: Service
@@ -119,6 +123,8 @@ tapi pull ulangnya ~18 menit, bukan "10+ menit untuk 17 GB").
 gagal**: `POST /v1/audio/speech` (voice gufron) → HTTP 503 tepat di 600,28 dtk
 (§1.9). TTS OmniVoice di CPU VPS **tidak layak produksi**; narasi tetap
 mengandalkan VoiceStudio laptop sampai ada keputusan mesin baru (§3.6).
+Percobaan engine ringan GGUF (§1.10) juga gagal di hardware ini — vonisnya
+di §1.10, opsi lanjut di §3.6.
 
 ### 1.2 ServiceAccount + RBAC minimal untuk GitHub runner
 
@@ -309,6 +315,71 @@ POST /v1/audio/speech → HTTP 503 tepat di 600,28 dtk
 menunggu keputusan pemilik server (§3.6); sampai ada keputusan, narasi
 tetap lewat VoiceStudio laptop (rute terbukti jalan).
 
+### 1.10 Hasil GGUF — node VPS tidak bisa menjalankan engine TTS Indonesia apa pun
+
+Keputusan pemilik 26 Nov 11:51: coba engine ringan GGUF di VPS (setelah
+§1.9). Zenith menyelidiki katalog, menaikkan limit memori, memasang dua
+engine Python, lalu menguji keduanya. Hasilnya: **bukan masalah engine —
+masalah hardware node**.
+
+#### Limit memori pod 4 GiB → 7 GiB
+
+```bash
+sudo /usr/local/bin/kubectl set resources deploy/voicestudio -n render \
+  --limits=memory=7000Mi
+```
+
+Manifest lokal `voicestudio-vps38.yaml` diperbarui agar sama dengan live state
+(jangan sampai apply berikutnya mengembalikan limit lama). Env
+`OMNIVOICE_DOTS_TTS_PRECISION=bfloat16` juga ditambahkan ke manifest (§1.1).
+
+#### Dua engine terinstal + import OK — lalu OOM (exit 137)
+
+| Engine | Detail | Weights di PVC |
+| --- | --- | --- |
+| dots-tts (Python, 2B, 24 bahasa incl. id, Apache-2.0) | sidecar venv, import OK | snapshot 4,9 GB (15 file) di HF cache PVC |
+| VoxCPM2 (2B, 30 bahasa incl. id, Apache-2.0) | import OK | ~5 GB di PVC |
+
+Keduanya mati OOM saat load model (exit 137), meski limit sudah 7 GiB:
+
+- **dots-tts:** bobot BF16 2,198 miliar parameter; load default CPU memakai
+  float32 → butuh **±9 GB RAM**. `bfloat16` di CPU **ditolak eksplisit oleh
+  upstream** (`_check_torch_env` → `RuntimeError: Half-precision is not
+  reliable on CPU`). Env `OMNIVOICE_DOTS_TTS_PRECISION=bfloat16` sudah sampai
+  ke proses backend, tapi load fp32 sudah OOM duluan.
+- **VoxCPM2:** LLM 2B bf16 ±4 GB + AudioVAE + ZipEnhancer/denoiser + torch +
+  backend ±1,3 GB tetap melewati 7000Mi.
+- Node vps-38 hanya **7,75 GB total** — tidak ada ruang untuk keduanya.
+
+#### Penyebab GGUF mati: CPU Xeon E5620 (2010) tanpa AVX/AVX2/FMA
+
+Terverifikasi dari `/proc/cpuinfo` di vps-29 dan di dalam pod vps-38: kedua
+node pakai **Intel Xeon E5620 (2010) TANPA AVX/AVX2/FMA**. Akibatnya:
+
+- Biner prebuilt **audio.cpp / dots-tts GGUF menolak jalan**:
+  `CPU ISA level is lower than required`.
+- **OmniVoice GGUF** butuh **GLIBC_2.43**, image pod glibc **2.39** → tidak
+  bisa dieksekusi. Biner + lib sudah disalin ke PVC
+  `/app/omnivoice_data/gguf-bin/bin/` (74 MB) untuk masa depan (node/image
+  yang memenuhi syarat).
+- **CosyVoice3 GGUF** butuh build dari source — masalah ISA yang sama.
+
+Catatan: dari tiga kandidat GGUF awal, hanya dots-tts-soar yang resmi
+mendukung Bahasa Indonesia (Breeze-TTS-2 hanya Inggris+Mandarin,
+Fun-CosyVoice3 hanya 9 bahasa tanpa id) — tapi itu sudah tidak relevan di
+node ini: **semua** jalur GGUF mati di ISA, bukan di dukungan bahasa.
+
+#### Vonis hardware
+
+**Node VPS ini tidak bisa menjalankan engine TTS berbahasa Indonesia apa pun
+di VoiceStudio 0.5.8.** OmniVoice PyTorch satu-satunya yang jalan — dan itu
+pun 165x real-time + budget 600 dtk, tidak layak produksi (§1.9). Opsi
+lanjut ada di §3.6.
+
+**Peringatan operasional:** dengan limit 7 GiB, VoiceStudio sendiri hampir
+memenuhi node 7,75 GB — jangan jalankan render Job bersamaan dengan
+load/generate VoiceStudio (7 + 1,6 GiB peak render > node; lihat §1.3).
+
 ## 2. Keputusan desain: pisah VoiceStudio dan render Job
 
 Diputuskan pemilik server 26 November 2026 ~01:34 ("Pisah seperti saranmu"):
@@ -417,19 +488,30 @@ Dua keputusan yang saling terkait, keduanya belum diputuskan:
 
 ### 3.6 Keputusan lanjut: mesin TTS VPS + perbaikan akar jaringan vps-38
 
-Menunggu keputusan pemilik (setelah §1.9):
+Menunggu keputusan pemilik (setelah §1.9 dan §1.10):
 
-1. **Mesin TTS VPS.** OmniVoice CPU tidak layak produksi. Opsi: (a) engine
-   ringan GGUF / Supertonic-3 — voice clone kemungkinan harus dibuat ulang,
-   lisensi diterima sendiri; (b) fallback narasi ke VoiceStudio laptop
-   (rute terbukti jalan); (c) buru budget override 600 dtk — tetap tidak
-   layak produksi; (d) torch-compile — payoff tak pasti.
+1. **Mesin TTS VPS — jalur GGUF SUDAH TERJAWAB (§1.10): tidak bisa di node
+   ini.** Opsi (a) engine ringan GGUF / Supertonic-3 gugur — bukan soal
+   engine, tapi CPU Xeon E5620 tanpa AVX dan RAM 7,75 GB. Opsi yang tersisa:
+   (1) **narasi via VoiceStudio laptop (RTX 3050, terbukti jalan)** — jalur
+   yang dipakai sampai ada keputusan lain; (2) **upgrade RAM VPS** —
+   dots / VoxCPM2 baru bisa LOAD, tapi kecepatan di E5620 kemungkinan tetap
+   terlalu lambat untuk narasi 60 dtk; (3) **node baru dengan AVX2 + RAM
+   lebih besar** — membuka jalur GGUF cepat. Opsi (c) buru budget override
+   600 dtk dan (d) torch-compile tetap tidak layak / payoff tak pasti seperti
+   sebelumnya.
 2. **Perbaikan akar jaringan pod vps-38** (§1.6): pod-to-pod tetap rusak;
    perbaikan butuh akses pemilik ke vps-38 (cek `iptables FORWARD`,
    `bridge fdb`, `ip neigh`) atau persetujuan eksplisit untuk rute
    privileged. Sampai diperbaiki, Job render di vps-38 yang butuh DNS /
    pod-to-pod kena masalah yang sama — DNS bypass per-pod (§1.6) adalah pola
    yang dipakai bila ada workload lain yang butuh nama eksternal.
+3. **Lisensi Serveurperso/OmniVoice-GGUF — MOOT, JANGAN diterima dulu.**
+   Model `Serveurperso/OmniVoice-GGUF`, lisensi **CC-BY-NC-4.0**,
+   fingerprint `v2:c61e2d14574712db2441bc5e7e01eb5cec871473fcf95a8e8ca07799fa0d8f42`
+   — statusnya MOOT sampai ada keputusan soal jalur GGUF (item 1 di atas).
+   Menerima lisensi adalah persetujuan legal — agen tidak boleh menerimanya
+   atas nama pemilik.
 
 ## 4. Ringkasan
 
@@ -438,8 +520,10 @@ Menunggu keputusan pemilik (setelah §1.9):
   §1.7, profil TTS `tier=fast` §1.8) — lisensi diterima (§3.1), 4 voice
   diimpor (§3.2), weights terunduh. **Tapi TTS belum bisa dipakai produksi:**
   test generate gufron → HTTP 503 di 600,28 dtk, CPU VPS ~165x real-time
-  (§1.9). Narasi tetap lewat VoiceStudio laptop sampai ada keputusan mesin
-  baru (§3.6).
+  (§1.9). Percobaan engine ringan GGUF (§1.10) juga gagal — node Xeon E5620
+  tanpa AVX, RAM 7,75 GB: dots-tts dan VoxCPM2 OOM, biner GGUF menolak jalan;
+  vonis: tidak ada engine TTS Indonesia yang bisa jalan di node ini. Narasi
+  tetap lewat VoiceStudio laptop sampai ada keputusan mesin baru (§3.6).
 - **Jaringan pod vps-38 rusak di data plane** (§1.6): pod-to-pod mati, DNS
   via kube-dns mati; bypass DNS per-pod adalah workaround, bukan perbaikan
   akar.
