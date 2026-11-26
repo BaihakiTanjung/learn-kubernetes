@@ -12,7 +12,10 @@ Muse, render tetap di VPS; draf office-3d SELESAI 26 Nov (§1.13) —
 tersentuh**; Deployment render standby SELESAI 26 Nov 22:12 (§1.14) —
 smoke test still lulus, rute baked video-audio ditutup untuk T-013;
 **di-rename 26 Nov 22:30 jadi `render-worker` — worker render umum
-(three.js, ffmpeg), HPA tidak dipasang.**
+(three.js, ffmpeg), HPA tidak dipasang.** Akar jaringan pod vps-38
+SELESAI 26 Nov 22:56 (§1.15) — UFW vps-29 memblokir UDP 8472
+(flannel VXLAN), diperbaiki satu command, terverifikasi ping lintas-node
+10/10 dua arah + DNS dari pod vps-38 jalan.
 Yang MENUNGGU tangan/keputusan pemilik server dipisah tegas di
 §3 — jangan dicampur dengan yang sudah selesai. Tidak ada perubahan di klaster
 pada penulisan dokumen ini; semua yang di bawah adalah yang benar-benar
@@ -273,6 +276,10 @@ pod).
 
 **Batasan:** ini workaround per-pod, **bukan perbaikan jaringan vps-38** —
 pod-to-pod tetap rusak. Perbaikan akar masih menunggu (§3.6).
+
+**Perbaikan akar SELESAI 26 Nov 22:56 — lihat §1.15.** DNS bypass Opsi B
+kemungkinan sudah tidak diperlukan untuk workload baru di vps-38 (pod di
+sana kini mencapai kube-dns normal).
 
 ### 1.7 STT faster-whisper-base terinstal di VoiceStudio VPS
 
@@ -837,8 +844,97 @@ Sisa (jujur):
 
 **Opsi lanjutan (belum dikerjakan, belum diputuskan):** migrasi render
 ke **vps-38 (95% kosong)** — butuh PVC baru di vps-38 + salin proyek
-406 MB + DNS bypass Opsi B (§1.6) + image pull. Ini menghilangkan
-masalah RAM tipis di vps-29; dicatat di §3.6 butir 4.
+406 MB + image pull. Ini menghilangkan masalah RAM tipis di vps-29;
+dicatat di §3.6 butir 4. Catatan pasca-§1.15: DNS bypass Opsi B (§1.6)
+kemungkinan sudah tidak diperlukan lagi untuk migrasi ini.
+
+### 1.15 Akar jaringan pod vps-38 — UFW vps-29 memblokir UDP 8472 (SELESAI 26 Nov 22:56)
+
+**Bukan flannel, bukan FDB, bukan rute, bukan iptables-init saat join.**
+Diagnosis 26 Nov 10:12 (§1.6) menuding data plane pod vps-38 rusak —
+pod tidak bisa mencapai IP pod mana pun. Akar sebenarnya ditemukan
+26 Nov 22:38 (Zenith, dengan akses SSH langsung ke vps-38 — diberikan
+pemilik 22:25): **UFW di vps-29 aktif (`ENABLED=yes`) dan memblokir UDP
+8472, port flannel VXLAN.** Pemilik dulu membuka port yang dia kenal (22,
+80/443, 6443 — situs + API jalan), tapi UDP 8472 tidak pernah dibuka.
+ICMP lolos aturan default UFW, makanya ping pod→IP node dan pod→internet
+tetap jalan dan diagnosis lama mengira data plane yang rusak.
+
+Bukti (semua terukur; rincian lengkap di
+`~/workspace/muse-hq/hidden_files/k8s-balancing/BALANCING-PLAN.md` §1):
+
+- UFW vps-29 `ENABLED=yes`, `systemctl is-active ufw` = active; UFW
+  vps-38 `ENABLED=no` — makanya arah sebaliknya jalan.
+- Socket VXLAN `0.0.0.0:8472` UNCONN di vps-29 — flannel siap menerima,
+  paketnya yang tidak pernah sampai.
+- Counter flannel.1: paket dari vps-38 dienkapsulasi (TX naik), tapi RX
+  vps-29 **tetap 0 setelah 25 + 500 ping**. Arah sebaliknya: 500/500 ping
+  dari vps-29 sampai di flannel.1 vps-38 (RX +500). Hilangnya satu arah:
+  vps-38 → vps-29.
+- `/proc/net/snmp` Udp vps-29: InDatagrams +14 (noise) setelah 500 ping —
+  paket VXLAN tidak sampai ke layer UDP sama sekali.
+- eth0 vps-29: RX +656 paket saat 500 ping (≈500 VXLAN + ~156
+  background) — paket **sampai di NIC**, lalu dibuang antara NIC dan UDP,
+  yaitu di rantai INPUT firewall.
+- Probe UDP lain (port 9999, 53) dari vps-38: NoPorts tetap 1765 —
+  **semua** UDP masuk dari vps-38 dibuang, bukan cuma 8472.
+- Yang digugurkan: FDB kedua node lengkap dan cocok dengan anotasi
+  flannel, rute VXLAN ada di kedua node, `ip_forward=1`,
+  `bridge-nf-call-iptables=1`, enkapsulasi jalan di kedua arah, dan
+  pod-to-pod satu node di vps-38 kini jalan (dulu mati saat diagnosis
+  10:12 — kemungkinan diperbaiki restart k3s-agent 10:38, yang tidak
+  memperbaiki lintas-node karena itu urusan firewall). Hipotesis lama
+  (§1.6: FORWARD/FDB/nft-expr-counter) **gugur**.
+
+**Perbaikan — satu command, di vps-29, sebagai `rlordz12` (sudo pakai
+password; passwordless sudo hanya untuk kubectl):**
+
+```bash
+sudo ufw allow from 10.20.0.0/24 to any port 8472 proto udp
+```
+
+Efek langsung tanpa restart, persisten. **Yang TIDAK dilakukan agen:**
+eskalasi via privileged pod untuk mengubah iptables host — itu melewati
+batas sudo yang ditetapkan pemilik.
+
+**Jalan berliku — command pertama tidak mendarat (22:47–22:54):**
+perintah pertama yang dijalankan pemilik 22:47 ternyata tidak mengubah
+apa-apa — verifikasi 22:51: arah vps-38→vps-29 masih 0/20, DNS masih
+timeout; `sudo ufw status verbose` 22:53 menunjukkan aturan 8472 **TIDAK
+ADA** di daftar (hanya 22/80/443, lo, 10.42.0.0/16 pod CIDR,
+10.43.0.0/16 service CIDR, 6443) — kemungkinan command jalan di vps-38,
+seperti kejadian 10:34 (di sana UFW nonaktif, jadi rule tidak
+berpengaruh). Pemilik menjalankan ulang **DI vps-29** 22:54 → `Rule
+added`, `8472/udp ALLOW IN 10.20.0.0/24`.
+
+**Verifikasi 22:56 (Zenith) — root cause terkonfirmasi penuh:**
+
+- Ping lintas-node dua arah: **10/10, 0% loss** (rata-rata 3,25 ms /
+  3,53 ms). Sebelum perbaikan: vps-38→vps-29 0/500.
+- Counter flannel.1 vps-29 RX **+20** selama tes (dulu +0); UDP NoPorts
+  **+0** (tidak ada lagi paket UDP yang dibuang).
+- DNS dari pod vps-38 jalan: `google.com` resolve;
+  `kubernetes.default.svc.cluster.local` → `10.43.0.1`. Nama pendek
+  `kubernetes.default` → NXDOMAIN adalah perilaku normal (bukan
+  kegagalan).
+- Pod tes `nettest-v38` + `nettest-v29` (ns `default`) **dihapus**
+  setelah verifikasi.
+
+**Dampak:**
+
+- **DNS bypass Opsi B (§1.6) kemungkinan sudah tidak diperlukan** untuk
+  workload baru di vps-38 — pod di sana kini mencapai kube-dns normal.
+  Opsi B tetap tercatat sebagai workaround yang pernah dipakai; Deployment
+  VoiceStudio sendiri sudah dihapus atas perintah pemilik (§1.12), jadi
+  tidak ada yang perlu di-rollback.
+- **Descheduler TIDAK dipasang** — tahap berikutnya. Penilaian jujur di
+  BALANCING-PLAN.md §4: LowNodeUtilization default mengukur requests
+  (bukan pemakaian aktual), daya ungkit cuma ~500 Mi pod stateless, tuas
+  terbesar adalah keputusan Rancher (limit 3Gi / hapus) yang masih
+  pending di pemilik. Values Helm sudah disiapkan
+  (`k8s-balancing/descheduler-values.yaml`, DO-NOT-APPLY).
+- Migrasi render ke vps-38 (§3.6 butir 4) kini prasyarat jaringannya
+  terpenuhi; keputusan tetap menunggu pemilik.
 
 ## 2. Keputusan desain: pisah VoiceStudio dan render Job
 
@@ -983,24 +1079,27 @@ Menunggu keputusan pemilik (setelah §1.9 dan §1.10):
    di Fish; keputusan dari uji dengar. Opsi (c) buru budget override
    600 dtk dan (d) torch-compile tetap tidak layak / payoff tak pasti
    seperti sebelumnya.
-2. **Perbaikan akar jaringan pod vps-38** (§1.6): pod-to-pod tetap rusak;
-   perbaikan butuh akses pemilik ke vps-38 (cek `iptables FORWARD`,
-   `bridge fdb`, `ip neigh`) atau persetujuan eksplisit untuk rute
-   privileged. Sampai diperbaiki, Job render di vps-38 yang butuh DNS /
-   pod-to-pod kena masalah yang sama — DNS bypass per-pod (§1.6) adalah pola
-   yang dipakai bila ada workload lain yang butuh nama eksternal.
+2. **Perbaikan akar jaringan pod vps-38 — SELESAI 26 Nov 22:56 (§1.15).**
+   Akarnya UFW vps-29 memblokir UDP 8472 (flannel VXLAN), bukan
+   FORWARD/FDB seperti hipotesis lama — hipotesis itu gugur. Perbaikan:
+   satu command `sudo ufw allow from 10.20.0.0/24 to any port 8472 proto
+   udp` di vps-29 (dijalankan pemilik 22:54 setelah percobaan pertama
+   22:47 tidak mendarat); verifikasi: ping lintas-node 10/10 dua arah,
+   DNS dari pod vps-38 jalan. DNS bypass per-pod (§1.6) kemungkinan
+   sudah tidak diperlukan untuk workload baru di vps-38.
 3. **Lisensi Serveurperso/OmniVoice-GGUF — MOOT, JANGAN diterima dulu.**
    Model `Serveurperso/OmniVoice-GGUF`, lisensi **CC-BY-NC-4.0**,
    fingerprint `v2:c61e2d14574712db2441bc5e7e01eb5cec871473fcf95a8e8ca07799fa0d8f42`
    — statusnya MOOT sampai ada keputusan soal jalur GGUF (item 1 di atas).
    Menerima lisensi adalah persetujuan legal — agen tidak boleh menerimanya
    atas nama pemilik.
-4. **Migrasi render ke vps-38 (opsi, belum diputuskan)** (§1.14):
+4. **Migrasi render ke vps-38 (opsi, belum diputuskan)** (§1.14, §1.15):
    vps-38 95% kosong, sedangkan render video di vps-29 lolos tipis dari
    syarat pre-flight RAM 1500 MB (available 1758 MB). Migrasi butuh PVC
-   baru di vps-38 + salin proyek 406 MB + DNS bypass Opsi B (§1.6) +
-   image pull. Keputusan menunggu pemilik; sampai diputuskan, render
-   tetap di pod standby vps-29.
+   baru di vps-38 + salin proyek 406 MB + image pull. **Prasyarat
+   jaringan kini terpenuhi (§1.15)** — DNS bypass Opsi B (§1.6)
+   kemungkinan sudah tidak diperlukan lagi. Keputusan menunggu pemilik;
+   sampai diputuskan, render tetap di pod standby vps-29.
 
 ## 4. Ringkasan
 
@@ -1021,9 +1120,12 @@ Menunggu keputusan pemilik (setelah §1.9 dan §1.10):
   AMD EPYC punya AVX2), gate test + uji kualitas 4/4 voice lulus (§1.12);
   render tetap di VPS. Narasi kini lewat Laras sandbox; VoiceStudio laptop
   tetap cadangan; alternatif cloud (ElevenLabs/Fish) ada di §3.6.
-- **Jaringan pod vps-38 rusak di data plane** (§1.6): pod-to-pod mati, DNS
-  via kube-dns mati; bypass DNS per-pod adalah workaround, bukan perbaikan
-  akar.
+- **Jaringan pod vps-38 SUDAH DIPERBAIKI (§1.15):** akarnya UFW vps-29
+  memblokir UDP 8472 (flannel VXLAN) — bukan data plane. Perbaikan satu
+  command 26 Nov 22:54, terverifikasi 22:56 (ping lintas-node 10/10 dua
+  arah, DNS dari pod vps-38 jalan, pod tes dihapus). DNS bypass per-pod
+  (§1.6) kemungkinan sudah tidak diperlukan untuk workload baru di
+  vps-38.
 - **Runner GitHub punya akses minimal** (SA + Role hanya Job/Pod di ns `render`)
   — token dibaca pemilik sendiri untuk `K8S_RENDER_TOKEN` (§3.4).
 - **Penjadwalan diperbaiki di dua tempat:** 3 template Job render di-pin ke
